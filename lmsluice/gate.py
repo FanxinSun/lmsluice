@@ -33,15 +33,39 @@ error lmz caught. Note it belongs here and **not** in `plan.py`, where the
 decode rate is *measured* and the traffic is already inside the number --
 applying it there would be the same error in the other direction.
 
-## What this buys
+## Which term binds, and why the model may now say
 
-The old model gave the 2-CU display iGPU an interval of 4 - 36 GB/s, because
-one measured point fitted a compute-bound and a bandwidth-bound reading that
-differ 8x on a small device. In cycles the same device predicts a far narrower
-band, because `k` is now measured on the kernel rather than inferred from one
-point. The rows stop being 8x wide -- and must not become false precision
-instead, so every row still says it is a prediction and names the inputs it
-came from, and any row missing an input carries an interval naming which.
+This module used to report both readings and refuse to choose. One measured
+point on one card fitted a compute-bound and a bandwidth-bound reading equally
+well, and they differ 8x on a 2-CU part, so choosing would have been inventing
+the answer.
+
+That is no longer the state, and not because a reading turned out wrong. **Both
+are true, and which one binds is a property of the device.** lmz 1.3.0 measured
+`k` across a grid sweep rather than at one launch -- a sweep across residency is
+exactly what separates a latency-bound cost from a bandwidth ceiling, because
+the two predict different slopes as blocks are added. It also corrected `k`
+downward, from 230-330 to 217-248, and the direction matters more than the size:
+the old interval was fitted where **bandwidth was binding**, which is the regime
+that cannot distinguish the two; the new one comes from the rows below
+saturation, which is the regime a small device actually lives in.
+
+So the model picks, on the codec's published grounds and not on our inference,
+and `Constants.can_pick` is read from the codec rather than assumed. On a
+high-bandwidth card the memory system runs out first; on a 2-CU part compute
+binds by roughly 3x and the bandwidth reading is not live there at all.
+
+**A tighter interval is not a measurement, and this one is still a projection.**
+Everything lmz did was on an RTX 5080. Nobody has run a 2-CU device. Two things
+stay unverified and are stated on every row that depends on them: whether decode
+stays linear in resident lanes down to 2 CUs or meets a cache, scheduler or
+driver wall first, and how a unified-memory part behaves with a CPU contending
+for the same bus. The founding caveat survives the narrowing unchanged -- at one
+block per unit the smallest AMD iGPU still lands below the CPU decoder.
+
+The refusal machinery stays. Being able to decline a constant in a unit this
+curve cannot use predates lmz being able to answer the question, and being right
+today is not a reason to stop checking.
 
 **Still runs with no dependencies**: `python3 -m lmsluice.gate`, or the file
 directly, on a machine with neither lmsluice installed nor lmz present. That is
@@ -68,19 +92,31 @@ K_UNIT = "lane-cycles per decoded byte"
 # commit bd3fb42. Labelled, not hidden: when a codec is passed in, these are
 # not consulted.
 FALLBACK = {
-    "k_cycles_per_byte": (230.0, 330.0),
+    "k_cycles_per_byte": (217.0, 248.0),
     "expansion": 2.88,
     "achieved_fraction": 0.59,
     "lanes": 8,
+    "lut_bytes": 16 << 10,
+    "per_group_bytes": 640,
+    "block_threads": 192,
+    "blocks_at_measurement": (3, 4),
+    "k_single_point": False,
 }
 FALLBACK_PROVENANCE = (
-    "lmz.gpu.cost_model() as of bd3fb42: k measured by an occupancy sweep at "
-    "fixed byte traffic (64..384 threads/block, two runs within 1%) on one "
-    "RTX 5080. One device: a low-FLOP-per-byte part would tighten the interval "
-    "and has not been measured.")
+    "lmz.gpu.cost_model('shared') as of lmz 1.3.0: k measured by a grid sweep "
+    "at fixed byte traffic, 1 to 1191 blocks over identical input, linear in "
+    "resident blocks to within 3% below 84 blocks and bending as bandwidth "
+    "takes over, on one RTX 5080. NOT a single-point fit. The earlier 230-330 "
+    "was fitted where bandwidth was binding, which is the regime that cannot "
+    "separate the two readings; this one is taken from the rows below "
+    "saturation, which is the regime a small device actually runs in. One "
+    "device still: no low-FLOP-per-byte part has been measured.")
 
-# The occupancy the k interval was measured under: four blocks resident per
-# SM. This is not a footnote, it is what the interval means.
+# The occupancy the k interval was measured under: lmz publishes it as a range,
+# 3 to 4 blocks resident per SM. This is not a footnote, it is what the interval
+# means -- the two ends of `k` and the two ends of this range are the same fact
+# seen twice, so a device at or above the LOW end sits inside the measurement
+# rather than below it, and may claim a bracket. Below it, the row is a ceiling.
 #
 # k is lane-cycles under *partial latency hiding*. The decode loop is a
 # dependent shared-memory chain, and what hides a stall is another block
@@ -93,12 +129,19 @@ FALLBACK_PROVENANCE = (
 # The consequence for this module: a low-occupancy row is a one-sided
 # prediction. "No faster than X" is what it may claim, and it must say so in
 # the row, because the row is what gets quoted.
-K_MEASURED_AT_BLOCKS_PER_UNIT = 4
+K_MEASURED_AT_BLOCKS_PER_UNIT = 3      # the LOW end of lmz's 3-4
 
 
 @dataclass(frozen=True)
 class Constants:
-    """The codec's side of the model. All of it published, none of it ours."""
+    """The codec's side of the model. All of it published, none of it ours.
+
+    The shared-memory shape is here rather than at module scope because it is
+    the codec's kernel being described, not this machine. It used to be three
+    literals up top with a comment saying lmz published them only as prose;
+    lmz publishes them as fields now, so they arrive with everything else and
+    the literals are a fallback for standalone use.
+    """
 
     k_low: float
     k_high: float
@@ -106,10 +149,57 @@ class Constants:
     achieved_fraction: float
     provenance: str
 
+    # The kernel's shared-memory request, which decides residency.
+    lut_bytes: int = FALLBACK["lut_bytes"]
+    per_group_bytes: int = FALLBACK["per_group_bytes"]
+    lanes_per_group: int = FALLBACK["lanes"]
+    block_threads: int = FALLBACK["block_threads"]
+
+    # The occupancy k was measured under, and whether k came from a sweep.
+    blocks_at_measurement: int = K_MEASURED_AT_BLOCKS_PER_UNIT
+    k_single_point: bool | None = FALLBACK["k_single_point"]
+
     @property
     def traffic(self) -> float:
         """DRAM bytes moved per decoded byte: the plain out, the coded in."""
         return 1.0 + 1.0 / self.expansion
+
+    @property
+    def can_pick(self) -> bool:
+        """Whether `k` is strong enough to say which term binds on a device.
+
+        A single-point fit cannot: one measured rate divided by resident lanes
+        yields whatever closes the arithmetic, so it fits a compute-bound and a
+        bandwidth-bound reading equally and the model must report both. A value
+        from a sweep across residency can, because the sweep is what separates
+        them. This is the property that changed under the model, and it is read
+        from the codec rather than assumed.
+        """
+        return self.k_single_point is False
+
+    def shmem_per_block(self, threads: int | None = None) -> int:
+        t = self.block_threads if threads is None else threads
+        return self.lut_bytes + (t // self.lanes_per_group) * self.per_group_bytes
+
+    def blocks_per_unit(self, shmem_per_unit: int, max_threads_per_unit: int,
+                        threads: int | None = None) -> int:
+        """How many blocks a unit holds. Two limits apply; the smaller wins."""
+        t = self.block_threads if threads is None else threads
+        return min(shmem_per_unit // self.shmem_per_block(t),
+                   max_threads_per_unit // t)
+
+
+def _published(cost, field: str, default, pair: bool = False):
+    """One published scalar or interval, or `default` where the codec is silent.
+
+    Every value the curve needs is asked for the same way, so a codec that
+    publishes half of them contributes half and the rest fall back visibly
+    rather than the whole record being discarded for one gap.
+    """
+    got = getattr(cost, field, None)
+    if got is None or getattr(got, "low", None) is None:
+        return default
+    return (got.low, got.high) if pair else got.low
 
 
 def cost_from(codec_cost=None) -> Constants:
@@ -118,55 +208,111 @@ def cost_from(codec_cost=None) -> Constants:
     **Units are checked, not assumed.** A published `k` in a unit this curve
     does not recognise is reported and *not* used -- refusing loudly beats
     converting hopefully, which is how the FP32 proxy survived as long as it
-    did.
+    did. That refusal predates lmz being able to answer the question and
+    survives it: being right today is not a reason to stop checking.
     """
+    def build(k_low, k_high, provenance, cost=None):
+        """One construction path, so a refusal carries the same shape as a
+        success and cannot quietly drop the rest of the model."""
+        blocks = _published(cost, "blocks_per_unit_at_measurement",
+                            FALLBACK["blocks_at_measurement"], pair=True)
+        single = getattr(cost, "k_single_point", None) if cost is not None else None
+        return Constants(
+            k_low, k_high,
+            _published(cost, "expansion", FALLBACK["expansion"]),
+            _published(cost, "achieved_fraction", FALLBACK["achieved_fraction"]),
+            provenance,
+            lut_bytes=int(_published(cost, "shmem_lut_bytes",
+                                     FALLBACK["lut_bytes"])),
+            per_group_bytes=int(_published(cost, "shmem_per_group_bytes",
+                                           FALLBACK["per_group_bytes"])),
+            lanes_per_group=int(_published(cost, "lanes", FALLBACK["lanes"])),
+            block_threads=int(_published(cost, "block_threads",
+                                         FALLBACK["block_threads"])),
+            # The low end: k's own high end already prices that occupancy, so a
+            # device at or above it sits inside the measurement.
+            blocks_at_measurement=int(min(blocks)),
+            k_single_point=(FALLBACK["k_single_point"] if single is None
+                            else single))
+
     if codec_cost is None:
         lo, hi = FALLBACK["k_cycles_per_byte"]
-        return Constants(lo, hi, FALLBACK["expansion"],
-                         FALLBACK["achieved_fraction"],
-                         f"fallback: {FALLBACK_PROVENANCE}")
+        return build(lo, hi, f"fallback: {FALLBACK_PROVENANCE}")
     k = getattr(codec_cost, "k", None)
     if k is None or not k.low:
         lo, hi = FALLBACK["k_cycles_per_byte"]
-        return Constants(lo, hi, FALLBACK["expansion"],
-                         FALLBACK["achieved_fraction"],
-                         f"codec published no k; fallback: {FALLBACK_PROVENANCE}")
+        return build(lo, hi,
+                     f"codec published no k; fallback: {FALLBACK_PROVENANCE}",
+                     codec_cost)
     if k.unit != K_UNIT:
         lo, hi = FALLBACK["k_cycles_per_byte"]
-        return Constants(lo, hi, FALLBACK["expansion"],
-                         FALLBACK["achieved_fraction"],
-                         f"REFUSED: the codec publishes k as {k.low}-{k.high} "
-                         f"{k.unit}, and this curve is written in {K_UNIT}. "
-                         f"They do not convert without further per-device "
-                         f"numbers, so the published value is not used. "
-                         f"Fallback: {FALLBACK_PROVENANCE}")
-    return Constants(k.low, k.high, FALLBACK["expansion"],
-                     FALLBACK["achieved_fraction"],
-                     k.provenance or "published by the codec")
+        # The refusal is about `k` alone. Whatever else the codec published in
+        # units this curve does recognise is still used, and the row says which
+        # value was declined -- a units error in one field is not a reason to
+        # throw away the others.
+        return build(lo, hi,
+                     f"REFUSED: the codec publishes k as {k.low}-{k.high} "
+                     f"{k.unit}, and this curve is written in {K_UNIT}. "
+                     f"They do not convert without further per-device "
+                     f"numbers, so the published value is not used. "
+                     f"Fallback: {FALLBACK_PROVENANCE}", codec_cost)
+    return build(k.low, k.high,
+                 k.provenance or "published by the codec", codec_cost)
 
 
 @dataclass(frozen=True)
 class Device:
     """A device, as the cycles model needs it.
 
-    `resident_lanes` and `clock_ghz` are what the model added; `gb_s` it always
-    needed. A `None` in any of them is not an error -- the row then carries an
-    interval and names what is missing, which is the honest state for a device
-    nobody has probed.
+    It carries **device facts only** -- units, shared memory per unit, threads
+    per unit, clock, bus. Residency is derived from those against the codec's
+    published kernel shape at predict time, not stored. An earlier version
+    baked the lanes in at import, which meant a device row silently described
+    whatever kernel shape was current the day it was written.
+
+    A `None` in any of them is not an error -- the row then carries an interval
+    and names what is missing, which is the honest state for a device nobody
+    has probed.
     """
 
     name: str
     gb_s: float                     # peak DRAM bandwidth
     source: str                     # measured where, or derived how
-    resident_lanes: int | None = None
+    units: int | None = None        # SMs, WGPs, CUs: whatever owns a shmem pool
+    shmem_per_unit: int | None = None
+    max_threads_per_unit: int | None = None
     clock_ghz: float | None = None
     gflops: float | None = None     # kept only to show what the old model used
-    blocks_per_unit: int | None = None   # occupancy, against k's measurement
     occupancy_verified: bool = False     # the shared-memory budget was read,
                                          # not assumed from an architecture
 
+    def blocks_per_unit(self, c: Constants) -> int | None:
+        if not self.shmem_per_unit or not self.max_threads_per_unit:
+            return None
+        return c.blocks_per_unit(self.shmem_per_unit, self.max_threads_per_unit)
+
+    def resident_lanes(self, c: Constants) -> int | None:
+        """Lanes resident across the device, from its own shared-memory budget.
+
+        **This captures occupancy and not latency hiding**, and the difference
+        is the whole of the caveat below. How many lanes are resident is
+        arithmetic on a memory budget. Whether a resident lane is *stalled* on
+        its dependent load depends on there being another block to switch to,
+        and that is inside `k` -- measured across 3 to 4 blocks per unit and
+        not adjusted here, because adjusting it would be inventing a latency
+        model lmz has not published.
+        """
+        b = self.blocks_per_unit(c)
+        if b is None or not self.units:
+            return None
+        return self.units * b * c.block_threads
+
     @property
-    def hides_latency_as_measured(self) -> bool:
+    def hides_latency_as_measured_needs(self) -> bool:
+        """Whether the occupancy was read off the device rather than assumed."""
+        return self.occupancy_verified
+
+    def hides_latency_as_measured(self, c: Constants) -> bool:
         """Whether this row may claim a bracket rather than a ceiling.
 
         Requires the occupancy to be **verified**, not merely derived. The
@@ -174,27 +320,34 @@ class Device:
         every part here except the one lmz measured on, that budget is an
         architectural assumption rather than a number anybody read off the
         device. On the 2-CU display adapter the assumption alone decides
-        whether the row is a bracket or a ceiling -- 128 KiB per WGP gives
-        four blocks and a bracket, 64 KiB gives two and a ceiling -- and being
+        whether the row is a bracket or a ceiling -- 128 KiB per WGP gives four
+        blocks and a bracket, 64 KiB gives two and a ceiling -- and being
         confidently optimistic on precisely that device class is the failure
         this model exists to avoid. So an unverified budget is treated as
         low-occupancy until `probe/` reads it.
         """
-        return (self.occupancy_verified
-                and self.blocks_per_unit is not None
-                and self.blocks_per_unit >= K_MEASURED_AT_BLOCKS_PER_UNIT)
+        b = self.blocks_per_unit(c)
+        return (self.occupancy_verified and b is not None
+                and b >= c.blocks_at_measurement)
 
     def bandwidth_bound(self, c: Constants) -> float:
         """GB/s of plaintext the memory system can sustain."""
         return self.gb_s * c.achieved_fraction / c.traffic
 
     def compute_bound(self, c: Constants) -> tuple[float, float] | None:
-        """(low, high) GB/s from lanes and clock, or None if either is unknown."""
-        if not self.resident_lanes or not self.clock_ghz:
+        """(low, high) GB/s from lanes and clock, or None if either is unknown.
+
+        Lanes times clock, divided by k. **Never a FLOP rate**: lmz establishes
+        that k is dependent-load latency rather than an issue rate, by decode
+        being linear in resident lanes across an 84x range where an
+        issue-limited kernel would have flattened. `gflops` is carried on the
+        row to show what the retired model used and is not read here.
+        """
+        lanes = self.resident_lanes(c)
+        if not lanes or not self.clock_ghz:
             return None
         hz = self.clock_ghz * 1e9
-        return (self.resident_lanes * hz / c.k_high / 1e9,
-                self.resident_lanes * hz / c.k_low / 1e9)
+        return (lanes * hz / c.k_high / 1e9, lanes * hz / c.k_low / 1e9)
 
     def predict(self, c: Constants) -> tuple[float, float, str]:
         """(low, high, what bounds it).
@@ -209,80 +362,44 @@ class Device:
         if comp is None:
             return 0.0, bw, "no lanes/clock: bandwidth ceiling only"
         lo, hi = min(comp[0], bw), min(comp[1], bw)
-        if not self.hides_latency_as_measured:
-            why = (f"{self.blocks_per_unit} blocks/unit assumed, not read"
-                   if self.blocks_per_unit is not None
+        if not self.hides_latency_as_measured(c):
+            b = self.blocks_per_unit(c)
+            why = (f"{b} blocks/unit assumed, not read" if b is not None
                    else "occupancy unknown")
             return 0.0, hi, (f"CEILING: {why}; k was measured at "
-                             f"{K_MEASURED_AT_BLOCKS_PER_UNIT} blocks/unit, "
+                             f"{c.blocks_at_measurement}+ blocks/unit, "
                              f"below which it is a floor")
         if hi >= bw - 1e-9:
             return lo, hi, ("bandwidth" if lo >= bw - 1e-9 else "both, k decides")
         return lo, hi, "compute"
 
+    def margin(self, c: Constants) -> float | None:
+        """How far the binding term sits below the other one.
 
-# --- Resident lanes -------------------------------------------------------
-#
-# The one derived quantity, and it is derived here rather than baked so it
-# re-evaluates on a device nobody has run. lmz publishes the shape of its
-# kernel's shared-memory request in the provenance of `cost_model()`: a
-# 16 KiB lookup table plus 640 bytes per group of 8 lanes, and the kernel is
-# compute-bound below 192 threads a block.
-#
-# The published shape is prose, not a field -- see the report; reading it as
-# structure would mean parsing English, so it is restated here with a pointer
-# back and will move into the constants when the codec publishes it properly.
-
-LUT_BYTES = 16 << 10           # per block, whatever the block size
-PER_GROUP_BYTES = 640          # per group of `lanes` threads
-LANES_PER_GROUP = 8
-BLOCK_THREADS = 192            # cost_model()["bound"]["compute_below_threads"]
-
-
-def shmem_per_block(threads: int = BLOCK_THREADS) -> int:
-    return LUT_BYTES + (threads // LANES_PER_GROUP) * PER_GROUP_BYTES
-
-
-def blocks_per_unit(shmem_per_unit: int, max_threads_per_unit: int,
-                    threads: int = BLOCK_THREADS) -> int:
-    """How many blocks a unit holds. Two limits apply; the smaller wins."""
-    return min(shmem_per_unit // shmem_per_block(threads),
-               max_threads_per_unit // threads)
-
-
-def resident(units: int, shmem_per_unit: int, max_threads_per_unit: int,
-             threads: int = BLOCK_THREADS) -> int:
-    """Lanes resident across the device, from its own shared-memory budget.
-
-    `units` is SMs, CUs or whatever the device calls the thing that owns a
-    shared-memory pool.
-
-    **This captures occupancy and not latency hiding**, and the difference is
-    the whole of the caveat above. How many lanes are resident is arithmetic
-    on a memory budget, and it is what this returns. Whether a resident lane
-    is *stalled* on its dependent load depends on there being another block to
-    switch to, and that is inside `k` -- measured at four blocks per unit and
-    not adjusted here, because adjusting it would be inventing a latency model
-    lmz has not published. So a device below that occupancy is predicted
-    optimistically by exactly the amount the chain goes unhidden, and the row
-    says "no faster than" rather than pretending to bracket it.
-    """
-    return units * blocks_per_unit(shmem_per_unit, max_threads_per_unit,
-                                   threads) * threads
+        The quantity that decides whether the two readings are separable on
+        *this* device. Above 1 the compute term binds and by how much; below 1
+        bandwidth does. A single-point `k` cannot support this and the caller
+        must check `c.can_pick` before quoting it.
+        """
+        comp = self.compute_bound(c)
+        if comp is None:
+            return None
+        bw = self.bandwidth_bound(c)
+        return bw / comp[1] if comp[1] else None
 
 
 # --- Devices ------------------------------------------------------------------
-# Two rows carry the numbers the cycles model needs, because this box measured
-# them. The rest carry `None` and say so: a device nobody has probed gets a
-# bandwidth ceiling and no floor, which is an honest gap rather than a wide
-# guess dressed as an interval. `probe/` is what closes them.
+# Rows carry device facts; residency is derived against the codec's kernel
+# shape at predict time. A device nobody has probed gets a bandwidth ceiling
+# and no floor, which is an honest gap rather than a wide guess dressed as an
+# interval. `probe/` is what closes them.
 
 DEVICES = [
     Device("RTX 5080 (dGPU)", 960.0,
-           "bus and clock from lmz cost_model() provenance; lanes derived "
-           "from 84 SMs x 228 KiB shared, 2048 threads/SM",
-           resident_lanes=resident(84, 228 << 10, 2048), clock_ghz=2.66,
-           gflops=53_691, blocks_per_unit=blocks_per_unit(228 << 10, 2048),
+           "bus and clock from lmz cost_model() provenance; 84 SMs x 228 KiB "
+           "shared, 2048 threads/SM",
+           units=84, shmem_per_unit=228 << 10, max_threads_per_unit=2048,
+           clock_ghz=2.66, gflops=53_691,
            occupancy_verified=True),   # lmz measured k on this device
     Device("M4 Max (unified)", 546.0,
            "spec bus; lanes and clock not taken -- Apple threadgroup memory "
@@ -299,17 +416,16 @@ DEVICES = [
            gflops=2_500),
     Device("Radeon 2-CU (iGPU)", 59.4,
            "bus measured, MEASURED.md; clock 2.2 GHz from that file's FMA "
-           "arithmetic; lanes shown assume 4 blocks/unit and ARE NOT VERIFIED "
-           "-- Vulkan on this device reports maxComputeSharedMemorySize=32768, "
-           "which is a per-workgroup cap rather than the per-unit pool "
-           "occupancy needs, and the kernel's 31744 B request fits it with "
-           "1024 B to spare. At 1 block/unit the row would be 1.3-1.8 GB/s, "
-           "below the CPU decoder. See the closing note.",
-           resident_lanes=resident(1, 128 << 10, 2048), clock_ghz=2.2,
-           gflops=567, blocks_per_unit=blocks_per_unit(128 << 10, 2048)),
-           # occupancy_verified stays False: 128 KiB per WGP is an RDNA2
-           # architectural figure, not a number read off this adapter, and it
-           # is the difference between four blocks and two.
+           "arithmetic; shared memory per WGP is an RDNA2 architectural "
+           "figure and IS NOT VERIFIED -- Vulkan on this device reports "
+           "maxComputeSharedMemorySize=32768, a per-workgroup cap rather than "
+           "the per-unit pool occupancy needs, and the kernel's request fits "
+           "it with room to spare. See the closing note.",
+           units=1, shmem_per_unit=128 << 10, max_threads_per_unit=2048,
+           clock_ghz=2.2, gflops=567),
+           # occupancy_verified stays False: 128 KiB per WGP is architectural,
+           # not read off this adapter, and it is the difference between four
+           # blocks and two.
 ]
 
 # The other axis, and the one the first version of this gate left out: the
@@ -365,13 +481,41 @@ def _table(codec_cost=None) -> None:
         cs = "  unknown" if comp is None else f"{comp[0]:.0f} - {comp[1]:.0f}"
         band = (f"<= {hi:.1f}" if lo <= 0.0
                 else (f"{lo:.1f} - {hi:.1f}" if hi - lo > 0.05 else f"{hi:.1f}"))
-        print(f"{d.name:<24}{(d.resident_lanes or 0):>8}"
+        print(f"{d.name:<24}{(d.resident_lanes(c) or 0):>8}"
               f"{(d.clock_ghz or 0):>6.2f}{d.gb_s:>10.1f}{cs:>16}{bw:>9.0f}"
               f"   {band:>12}   {why}")
     print()
+
+    # --- Which term binds, and whether we are entitled to say -----------------
+    if c.can_pick:
+        print("WHICH TERM BINDS IS A PROPERTY OF THE DEVICE, and k is now strong")
+        print("enough to say so. It came from a sweep across residency rather than")
+        print("from one launch, and a sweep is what separates a compute-bound from")
+        print("a bandwidth-bound reading -- one point fits both.\n")
+        for d in DEVICES:
+            m = d.margin(c)
+            if m is None:
+                continue
+            if m > 1:
+                print(f"  {d.name:<24} compute binds, {m:.1f}x below its own "
+                      f"bandwidth ceiling")
+            else:
+                print(f"  {d.name:<24} bandwidth binds, {1 / m:.1f}x below its "
+                      f"compute ceiling")
+        print()
+        print("  So the two readings the old model could not separate are both true,")
+        print("  and they bind on different devices. On a high-bandwidth card the")
+        print("  memory system runs out first; on a small integrated part compute")
+        print("  does, by a wide enough margin that the bandwidth reading is not")
+        print("  live there at all.\n")
+    else:
+        print("k is a single-point fit, so this model reports both readings and")
+        print("declines to pick between them. One measured rate divided by resident")
+        print("lanes yields whatever closes the arithmetic.\n")
+
     print("A row reading '<= X' is one-sided and must be quoted that way.")
     print(f"k was measured under partial latency hiding at "
-          f"{K_MEASURED_AT_BLOCKS_PER_UNIT} blocks per unit; a device holding")
+          f"{c.blocks_at_measurement}+ blocks per unit; a device holding")
     print("fewer hides less of the dependent-load chain, so its effective k")
     print("moves toward the high end or past it and the interval becomes a")
     print("floor. Resident lanes captures the occupancy part of that and not")
@@ -414,6 +558,7 @@ def _table(codec_cost=None) -> None:
     print("one point the constants were taken on, so agreement is a consistency")
     print("check and not a validation -- the model has not yet been tested against")
     print("a device it was not fitted on.\n")
+
     small = DEVICES[-1]
     lo, hi, _ = small.predict(c)
     cpu = MEASURED_DECODE["lmz CPU, 4-16 threads"]
@@ -421,19 +566,36 @@ def _table(codec_cost=None) -> None:
     print(f"the smallest integrated GPU AMD ships is predicted at no more than")
     print(f"{hi:.1f} GB/s against the CPU decoder's {cpu:.1f} -- so at most "
           f"{hi / cpu:.1f}x, and")
-    print("with no floor, because its occupancy is assumed rather than read.")
-    print("That is weaker than the old 4-36 GB/s interval looked and stronger")
-    print("than it actually was: the old floor was an artefact of reading one")
-    print("measured point as compute-bound.\n")
+    print("with no floor, because its occupancy is assumed rather than read.\n")
+
+    print("THE NARROWING IS NOT A MEASUREMENT. k went from 230-330 to 217-248")
+    print("because lmz swept its own card across grid sizes. NOBODY HAS RUN A")
+    print("2-CU DEVICE. Two things stay unverified, and they are worth more to")
+    print("a reader than the interval that just closed:")
+    print()
+    print("  1. Whether decode stays linear in resident lanes all the way down")
+    print("     to 2 CUs, or meets a cache, scheduler or driver wall first. The")
+    print("     linearity was established over an 84x range ON ONE CARD, none of")
+    print("     it near this size.")
+    print("  2. How a unified-memory part behaves when the CPU is contending for")
+    print("     the same bus. Every bandwidth figure here assumes the decoder has")
+    print("     the memory system to itself, which on an iGPU it does not.")
+    print()
     print("AND THE CEILING ITSELF IS NOT SAFE. The lanes above assume this")
     print("device holds four blocks per unit. Vulkan reports its per-workgroup")
-    print("shared-memory cap as 32768 B against a 31744 B kernel request -- so")
-    print("the kernel fits by 1024 B, and how many such blocks a unit holds is")
-    print("not something Vulkan exposes. At one block per unit the row becomes")
-    print("1.3-1.8 GB/s, which is BELOW the CPU decoder's 2.0. The plausible")
-    print("range for this device therefore spans the CPU decoder, and nothing")
-    print("here establishes that the iGPU wins. That is a question for the")
-    print("measurement, not for the wording.")
+    print("shared-memory cap as 32768 B against the kernel's request -- so it")
+    print("fits, and how many such blocks a unit holds is not something Vulkan")
+    small_1 = Device(small.name, small.gb_s, small.source, units=1,
+                     shmem_per_unit=c.shmem_per_block(), 
+                     max_threads_per_unit=small.max_threads_per_unit,
+                     clock_ghz=small.clock_ghz)
+    one = small_1.compute_bound(c)
+    print("exposes. At one block per unit the row becomes "
+          f"{one[0]:.1f}-{one[1]:.1f} GB/s, which is")
+    print(f"BELOW the CPU decoder's {cpu:.1f}. The plausible range for this device")
+    print("therefore spans the CPU decoder, and nothing here establishes that the")
+    print("iGPU wins. That is a question for the measurement, not for the wording.")
+
 
 
 def main() -> None:

@@ -211,11 +211,19 @@ class LmzCodec:
         """lmz's decoder cost constants, read from the codec where it publishes
         them and derived only where it does not.
 
-        As of lmz commit `bd3fb42` it publishes `lmz.gpu.cost_model()`, and
-        `k` is **measured** rather than inferred: (230, 330) lane-cycles per
-        decoded byte, from an occupancy sweep at fixed byte traffic. That is
-        the measurement `lmsluice/CLAUDE.md` calls the highest-value one this
-        repository could make, and it is no longer ours to make.
+        lmz publishes `lmz.gpu.cost_model()`, and `k` is **measured** rather
+        than inferred. As of 1.3.0 it is also no longer a single-point fit:
+        `k_is_single_point_fit` is False for the shared-table kernel, because
+        the value comes from a grid sweep at fixed byte traffic rather than
+        from one launch. That distinction is carried through here because it is
+        what lets a consumer pick between a compute-bound and a bandwidth-bound
+        reading instead of reporting both.
+
+        **No value is restated here.** Everything below is read out of the
+        published dict, including the kernel's shared-memory shape, which lmz
+        used to describe only in prose and now publishes as fields. A constant
+        copied across this boundary is correct until it is not, and goes stale
+        without saying so -- which is the whole reason this exchange exists.
 
         Note the unit. lmz publishes **lane-cycles**, and says in the same
         breath that the inner loop is a dependent shared-memory chain which
@@ -246,18 +254,51 @@ class LmzCodec:
         prov = published.get("provenance", {})
         where = "; ".join(str(prov.get(key, "")) for key in
                           ("kernel", "device", "method") if prov.get(key))
+        bound = published.get("bound") or {}
+
+        def scalar(name, value, unit, note="published by the codec"):
+            return Cost(name, low=value, high=value, unit=unit,
+                        provenance=note if value is not None
+                        else "not published by this codec")
+
+        def interval(name, value, unit):
+            lo, hi = (value if isinstance(value, (list, tuple)) and len(value) == 2
+                      else (value, value))
+            return Cost(name, low=lo, high=hi, unit=unit,
+                        provenance="published by the codec" if lo is not None
+                        else "not published by this codec")
+
         lo, hi = published.get("k_cycles_per_byte", (None, None))
-        lanes = published.get("lanes")
-        bps = published.get("bytes_per_symbol")
+        single = published.get("k_is_single_point_fit")
         return CodecCost(
             k=Cost("k", low=lo, high=hi, unit="lane-cycles per decoded byte",
                    provenance=f"measured and published by the codec: {where}"),
-            lanes=Cost("lanes", low=lanes, high=lanes,
-                       unit="rANS states per stream",
-                       provenance="published by the codec"),
-            bytes_per_symbol=Cost("bytes_per_symbol", low=bps, high=bps,
-                                  unit="coded bytes per symbol",
-                                  provenance="published by the codec"),
+            lanes=scalar("lanes", published.get("lanes"),
+                         "rANS states per stream"),
+            bytes_per_symbol=scalar("bytes_per_symbol",
+                                    published.get("bytes_per_symbol"),
+                                    "coded bytes per symbol"),
+            expansion=scalar("expansion", published.get("expansion"),
+                             "plain bytes per coded byte"),
+            achieved_fraction=scalar(
+                "achieved_fraction",
+                bound.get("saturates_at_fraction_of_peak_dram"),
+                "fraction of peak DRAM the kernel sustains"),
+            shmem_lut_bytes=scalar("shmem_lut_bytes",
+                                   published.get("shmem_lut_bytes"),
+                                   "bytes per block"),
+            shmem_per_group_bytes=scalar(
+                "shmem_per_group_bytes",
+                published.get("shmem_per_group_bytes"),
+                "bytes per group of `lanes` threads"),
+            block_threads=scalar("block_threads",
+                                 bound.get("compute_below_threads"),
+                                 "threads per block"),
+            blocks_per_unit_at_measurement=interval(
+                "blocks_per_unit_at_measurement",
+                published.get("blocks_per_unit_at_measurement"),
+                "blocks resident per unit"),
+            k_single_point=single,
             source="lmz.gpu.cost_model(), published")
 
     # -- the coupling, in one place ---------------------------------------

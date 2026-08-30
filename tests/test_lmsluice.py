@@ -1449,5 +1449,141 @@ class TestDestinationBuffer(unittest.TestCase):
             buffer._strategy, buffer._thp_mode = saved_state, saved_probe
 
 
+class TestGateModel(unittest.TestCase):
+    """The cycles curve: what it takes from the codec, and what it refuses.
+
+    lmz 1.3.0 separated the two readings this model used to report side by
+    side. These pin the properties that made that safe rather than the numbers,
+    which are the codec's and move when it does.
+    """
+
+    def setUp(self):
+        from lmsluice import gate
+
+        self.gate = gate
+
+    def test_k_comes_from_the_codec_not_from_a_copy(self):
+        """A constant copied across the boundary goes stale without saying so."""
+        from lmsluice.codec import Cost, CodecCost
+
+        published = CodecCost(
+            k=Cost("k", low=111.0, high=222.0,
+                   unit=self.gate.K_UNIT, provenance="a test codec"),
+            source="test")
+        c = self.gate.cost_from(published)
+        self.assertEqual((c.k_low, c.k_high), (111.0, 222.0))
+        self.assertNotEqual((c.k_low, c.k_high),
+                            self.gate.FALLBACK["k_cycles_per_byte"])
+
+    def test_a_k_in_the_wrong_unit_is_refused_not_converted(self):
+        """The refusal predates lmz answering the question and must survive it.
+
+        Being right today is not a reason to stop checking: this is how the
+        FP32 proxy survived as long as it did.
+        """
+        from lmsluice.codec import Cost, CodecCost
+
+        wrong = CodecCost(
+            k=Cost("k", low=9.0, high=9.0, unit="FP32 FLOP per byte",
+                   provenance="a codec using the retired unit"),
+            source="test")
+        c = self.gate.cost_from(wrong)
+        self.assertIn("REFUSED", c.provenance)
+        self.assertEqual((c.k_low, c.k_high),
+                         self.gate.FALLBACK["k_cycles_per_byte"],
+                         "a refused k must not reach the curve")
+
+    def test_a_refusal_still_uses_the_fields_that_were_in_the_right_unit(self):
+        """One bad field is not a reason to discard a whole published record."""
+        from lmsluice.codec import Cost, CodecCost
+
+        wrong = CodecCost(
+            k=Cost("k", low=9.0, high=9.0, unit="nonsense", provenance="x"),
+            expansion=Cost("expansion", low=4.0, high=4.0,
+                           unit="plain bytes per coded byte", provenance="x"),
+            source="test")
+        c = self.gate.cost_from(wrong)
+        self.assertIn("REFUSED", c.provenance)
+        self.assertEqual(c.expansion, 4.0)
+
+    def test_compute_scales_by_lanes_and_clock_and_never_by_flops(self):
+        """k is dependent-load latency, not an issue rate.
+
+        lmz establishes this by decode being linear in resident lanes across an
+        84x range, where an issue-limited kernel would have flattened. The
+        consumer-facing consequence is that a device's FP32 rate must not enter
+        the compute term -- so `gflops` may move by any amount and change
+        nothing.
+        """
+        c = self.gate.cost_from(None)
+        base = self.gate.Device("d", 100.0, "test", units=4,
+                                shmem_per_unit=128 << 10,
+                                max_threads_per_unit=2048, clock_ghz=1.0,
+                                gflops=1_000)
+        flops = self.gate.Device("d", 100.0, "test", units=4,
+                                 shmem_per_unit=128 << 10,
+                                 max_threads_per_unit=2048, clock_ghz=1.0,
+                                 gflops=1_000_000)
+        self.assertEqual(base.compute_bound(c), flops.compute_bound(c),
+                         "a FLOP rate reached the compute term")
+
+        faster = self.gate.Device("d", 100.0, "test", units=4,
+                                  shmem_per_unit=128 << 10,
+                                  max_threads_per_unit=2048, clock_ghz=2.0)
+        a, b = base.compute_bound(c), faster.compute_bound(c)
+        self.assertAlmostEqual(b[0] / a[0], 2.0, places=6)
+
+        wider = self.gate.Device("d", 100.0, "test", units=8,
+                                 shmem_per_unit=128 << 10,
+                                 max_threads_per_unit=2048, clock_ghz=1.0)
+        self.assertAlmostEqual(wider.compute_bound(c)[0] / a[0], 2.0, places=6)
+
+    def test_it_picks_only_when_k_came_from_a_sweep(self):
+        """One point fits both readings; a sweep across residency separates them."""
+        from lmsluice.codec import Cost, CodecCost
+
+        def built(single):
+            return self.gate.cost_from(CodecCost(
+                k=Cost("k", low=217.0, high=248.0, unit=self.gate.K_UNIT,
+                       provenance="test"),
+                k_single_point=single, source="test"))
+
+        self.assertTrue(built(False).can_pick)
+        self.assertFalse(built(True).can_pick,
+                         "a single-point fit must not be quoted as a pick")
+
+    def test_the_small_igpu_row_stays_one_sided(self):
+        """A tighter interval is not a measurement.
+
+        Nobody has run a 2-CU device. The narrowing came from a sweep on an
+        RTX 5080, so the row must still be a ceiling with no floor -- letting a
+        resolved ambiguity read as a measured small-device number is the error
+        this model exists to avoid.
+        """
+        c = self.gate.cost_from(None)
+        small = [d for d in self.gate.DEVICES if "2-CU" in d.name][0]
+        lo, hi, why = small.predict(c)
+        self.assertEqual(lo, 0.0, "the 2-CU row grew a floor it has not earned")
+        self.assertIn("CEILING", why)
+        self.assertFalse(small.occupancy_verified)
+
+    def test_it_still_runs_with_nothing_installed(self):
+        """The whole point is that it can be copied onto someone else's box."""
+        import shutil
+        import subprocess
+
+        d = tempfile.mkdtemp()
+        try:
+            shutil.copy(os.path.join(os.path.dirname(__file__), "..",
+                                     "lmsluice", "gate.py"),
+                        os.path.join(d, "gate.py"))
+            r = subprocess.run([sys.executable, "gate.py"], cwd=d,
+                               capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr[-800:])
+            self.assertIn("decode faster than its disk", r.stdout)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

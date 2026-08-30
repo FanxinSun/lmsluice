@@ -134,6 +134,36 @@ class CodecCost:
     k: Cost = field(default_factory=lambda: Cost("k"))
     lanes: Cost = field(default_factory=lambda: Cost("lanes"))
     bytes_per_symbol: Cost = field(default_factory=lambda: Cost("bytes_per_symbol"))
+
+    # The rest of the curve's inputs. These were held as literals in `gate.py`
+    # for as long as no codec published them, which made them copies of
+    # somebody else's constants sitting in the wrong repository -- the exact
+    # defect this record exists to remove, and one that survives being correct
+    # today because it goes stale silently.
+    expansion: Cost = field(default_factory=lambda: Cost("expansion"))
+    achieved_fraction: Cost = field(
+        default_factory=lambda: Cost("achieved_fraction"))
+
+    # The kernel's shared-memory request, which is what decides how many
+    # blocks a unit holds and therefore how many lanes are resident. Published
+    # as structure rather than as prose in a provenance string, so a consumer
+    # no longer has to restate it to use it.
+    shmem_lut_bytes: Cost = field(
+        default_factory=lambda: Cost("shmem_lut_bytes"))
+    shmem_per_group_bytes: Cost = field(
+        default_factory=lambda: Cost("shmem_per_group_bytes"))
+    block_threads: Cost = field(default_factory=lambda: Cost("block_threads"))
+
+    # The occupancy `k` was measured under. Not a footnote: it is what the
+    # interval means, and a device below it is predicted optimistically.
+    blocks_per_unit_at_measurement: Cost = field(
+        default_factory=lambda: Cost("blocks_per_unit_at_measurement"))
+
+    # Whether `k` came from one point or from a sweep. A single-point fit
+    # cannot distinguish a compute-bound from a bandwidth-bound reading, so a
+    # consumer that picks between them needs to know which it has.
+    k_single_point: bool | None = None
+
     source: str = ""
 
     @property
