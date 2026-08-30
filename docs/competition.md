@@ -167,13 +167,19 @@ what is unique is deciding per machine whether to use it.
   dedup *and delta across a hub*. Those measure different things, but ZipLLM
   names the structure that matters — almost every model is a fine-tune — and
   that is `strategy.md`'s Phase 3, unbuilt.
-- **The CPU decode gap is the number to worry about.** ZipNN publishes 1.66 GB/s
-  single-threaded; lmsluice measures lmz at **0.39–0.48 GB/s single-threaded**
-  and 1.05 GB/s at 8–16 threads, on a different CPU, with CRC verification on
-  (worth ~40% of decode) and a Python call boundary per chunk. That is not a
-  like-for-like comparison and must not be quoted as one — **but it is 3.5×,
-  and the gate is `decode > link`, so every factor on the decode side moves
-  the crossover.** Running ZipNN on this box against the same archive, in a
+- **The CPU decode gap is much smaller than this section first claimed.** It
+  gave lmz at 0.39–0.48 GB/s single-threaded and 1.05 at 8–16 threads against
+  ZipNN's published 1.66 single-thread, and called the gap 3.5×. Those were
+  `CODEC_BF16C` figures. Corrected, on the same box with CRC on: **0.95 GB/s
+  single-threaded** (1.09 with CRC off) and **5.95 GB/s through the transport**,
+  or 8.29 decode-only at 16 threads. So the single-thread gap is about
+  **1.5–1.75× on a different CPU**, not 3.5×, and ZipNN's 1.66 was taken on a
+  224-core dual-NUMA Xeon 8480+ where its own published multi-thread figure
+  needs that machine to reach 80 GB/s.
+
+  Still not a like-for-like comparison and still not to be quoted as one — but
+  the direction of the worry has changed, and it is why fetching torch to
+  measure ZipNN was deferred rather than done. Running ZipNN on this box against the same archive, in a
   fresh environment, is the single highest-value competitive measurement
   available and it has not been done.
 - **GPU decode is a commodity.** DietGPU at 250–600 GB/s and nvCOMP ANS at
@@ -339,10 +345,21 @@ Five conclusions, in the order they should affect `strategy.md`:
    points against a 35.0% ceiling. Lead with §4's wedge — the free diagnostic —
    and treat the ratio as a footnote, because a rival can close 1.1 points and
    cannot close "we measure your machine".
-4. **Measure ZipNN here.** One fresh environment, one archive, this box. It is
-   the only number in this document that would change a design decision, and
-   the published 1.66 GB/s single-thread figure sits directly on the decode side
-   of the gate.
+4. **Measure ZipNN here — attempted, blocked, deferred.** `zipnn` 0.5.4 cannot
+   be *imported* without `torch>=2.0.0`: `zipnn.py` imports it directly and
+   `util_torch.py` decorates with `@torch.jit.script` at module load, so a stub
+   cannot carry it. Its C core is importable alone and confirms the architecture
+   is byte-grouping plus zstd, the same family as lmz, but takes ten
+   undocumented arguments — reconstructing the pipeline around them would
+   measure the reconstruction rather than ZipNN.
+
+   Deferred rather than pursued: ~200 MB of torch on a possibly metered link,
+   and the corrected figures above shrank the gap that motivated it from 3.5× to
+   about 1.5–1.75×. **The import dependency is itself the competitively
+   meaningful fact** — for a layer aimed at phones, iGPU laptops and boxes with
+   no CUDA, a codec that cannot be loaded without a tensor framework differs
+   materially from lmz (no runtime dependencies) and `zstdcodec` (nothing at
+   all).
 5. **Phase 3 has a named competitor now.** ZipLLM's finding — 99.64% of hub
    models are fine-tunes of something, and cross-model delta gets 54.1% — is
    the argument for `strategy.md`'s "many models, not one archive", made by
