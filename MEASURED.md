@@ -1062,3 +1062,117 @@ One model family, one dtype, edits synthesised rather than taken from real
 consecutive releases — `c` for actual fine-tune revisions is unmeasured and is
 the input the crossover is most sensitive to. `/mnt/d` reads at 0.20 GB/s, which
 is why this used bounded samples rather than all 32 GB.
+
+---
+
+## The destination buffer costs more than the transport — 2026-08-30
+
+The finding that was held back pending fresh-process runs. It has them now: every
+row below is a **separate process, one measurement each, median of 5–7**, because
+a repeated in-process benchmark measures the allocator's state as much as the
+allocation. (It turned out not to matter — see Conditions — but that could not be
+known without checking.)
+
+`Model.load()` allocates its destination with `bytearray(self.plain_bytes)` before
+`_gather` reads a byte. On the 1.87 GB fixture that allocation is **0.55 s**, and
+the transport it exists to serve is **0.31 s**.
+
+### Where the cost is, and it is not where "allocation" suggests
+
+`bytearray(N)` zero-fills. Minor-fault counts locate the work exactly:
+
+| allocation | alloc | first write | total | minor faults | AnonHugePages | needs |
+|---|---|---|---|---|---|---|
+| `bytearray(N)` | 0.568 | 0.089 | **0.657** | 457,778 | 0 | stdlib |
+| `mmap(-1, N)` (defaults) | 0.000 | 0.835 | 0.835 | 457,730 | 0 | stdlib |
+| `mmap` + `MADV_HUGEPAGE` | 0.000 | 0.843 | 0.843 | 457,730 | 0 | stdlib |
+| `mmap` **`MAP_PRIVATE`** + `MADV_HUGEPAGE` | 0.000 | 0.147 | **0.147** | 1,407 | 1.74 GB | **stdlib** |
+| `numpy.empty` | 0.000 | 0.129 | **0.129** | 1,407 | 1.74 GB | numpy |
+
+The buffer is 457,519 pages. `bytearray` faults **every one of them eagerly**, at
+allocation, and writes 1.87 GB of zeroes that the decoder then overwrites — one
+whole redundant pass over the destination. `mmap` defers the faults instead of
+removing them, which is worse: 457,730 faults taken one at a time during the write
+cost more than taking them in a batch.
+
+The last two rows take **325× fewer faults** because the buffer is backed by 2 MiB
+huge pages, confirmed in `/proc/self/smaps` rather than inferred: 1,828,864 kB of
+`AnonHugePages` against 0 for every other row.
+
+**`MAP_PRIVATE` is the whole difference between rows 3 and 4.** Python's
+`mmap.mmap(-1, N)` defaults to `MAP_SHARED`; transparent huge pages do not back
+shared anonymous mappings, so `MADV_HUGEPAGE` on one is accepted and silently does
+nothing. That is why row 3 looks like a failed fix rather than a misconfigured one.
+
+### What it costs the load path
+
+Cold-protocol runs, fresh process each, n=5 median, the same 1.87 GB fixture and
+its 1 MiB-chunk `CODEC_BF16` archive:
+
+| route | destination | alloc | load | total | GB/s |
+|---|---|---|---|---|---|
+| plain | `bytearray` (what `load()` does) | 0.546 | 0.311 | 0.848 | 2.21 |
+| plain | huge-page buffer via `into=` | 0.000 | 0.361 | 0.361 | **5.18** |
+| coded | `bytearray` | 0.524 | 0.450 | 0.974 | 1.92 |
+| coded | huge-page buffer via `into=` | 0.000 | 0.449 | 0.449 | **4.18** |
+
+**2.4× on the plain route and 2.2× on the coded one, for a buffer.** No decoder,
+no scheduler, no link involved.
+
+### It does not move the gate, and it makes the coded route look slightly worse
+
+Both routes pay it identically, so the verdict does not change — but removing a
+*shared* fixed cost widens the proportional gap between them. Coded against plain
+goes from 1.13× slower to 1.24× slower. The allocation was partly masking the
+difference, and saying so is the point of recording it.
+
+### What it predicts elsewhere
+
+    cost  ≈  N / BW_mem_write  +  (N / page_size) × t_fault
+
+This box: the already-faulted write runs at 21 GB/s, so of `bytearray`'s 0.568 s
+only ~0.089 s is the zeroing itself and **~0.479 s is fault overhead**, about
+1.05 µs per 4 KiB page.
+
+The consequence that generalises: **this cost is a memory-subsystem cost, not a
+link cost, so it does not shrink when the link gets faster — it takes over.** At
+0.26 GB/s over 9p, 0.55 s is ~7% of the load. On a Gen5 array at 12 GB/s it is
+~78% of it. The faster the storage, the more of lmsluice's headline number is a
+buffer nobody asked for.
+
+Across the target envelopes the *remedy* is less portable than the problem:
+
+- **Linux with THP in `madvise` mode** (this box, most phones): the fix applies.
+- **THP set to `never`**: no remedy, `bytearray`'s cost stands.
+- **macOS/Apple silicon**: no `MADV_HUGEPAGE`, but 16 KiB base pages cut the fault
+  count 4× natively, so the problem is smaller and the fix unavailable.
+- **Windows**: large pages exist but need `SeLockMemoryPrivilege`, which a library
+  should not require.
+
+So it must be a runtime probe with a `bytearray` fallback, not an assumption —
+same shape as everything else here.
+
+### Conditions
+
+9800X3D, 24 GB WSL2, ext4 on Gen4 NVMe, CPython 3.14, 4 KiB pages, 2 MiB huge
+pages, `/sys/kernel/mm/transparent_hugepage/enabled` = `always [madvise] never`.
+Fixture `/home/rog/.cache/lmz-bench/model.safetensors` (1,872,871,856 plain
+bytes); archive `/home/rog/.cache/yfce-load-bench/llama.cs1m.lmz`.
+
+**The read is page-cache warm, not cold.** `posix_fadvise(DONTNEED)` was issued and
+the load ran at 5.9–6.0 GB/s, which is this box's warm rate — under WSL2 the Linux
+call cannot evict the Windows host's cache. The allocation figures are unaffected
+(they touch no file), but the *ratio* of allocation to transport is the warm one;
+cold, the transport would be ~0.78 s at 2.4 GB/s and allocation would be ~41% of
+the total rather than 64%.
+
+**Fresh-process and in-process agree here**, which was the open question: seven
+consecutive `bytearray(1.87 GB)` in one process cost 0.50–0.68 s each and faulted
+all 457,520 pages every time, because glibc `munmap`s an allocation this large on
+free rather than keeping it in an arena. No warm-allocator correction is needed at
+this size; at sizes below the mmap threshold it would be.
+
+**This supersedes the earlier 0.7–1.0 s figure**, which was a small in-process
+sample. It also settles the ≤0.3 s bound inferred from the cold end-to-end runs:
+that bound was wrong, because it assumed the published cold timings included the
+allocation. They timed `_gather`, not `load()`.
