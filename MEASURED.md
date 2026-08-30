@@ -963,3 +963,102 @@ ratio. It buys 6× on CPU decode as well, which was not known when it was chosen
 Decode-only, from RAM. An end-to-end load also reads the coded bytes, which is
 why the measured 0.94× sits below the 1.49× the ratio alone allows. One machine,
 one dtype, one checkpoint.
+
+## Job 3 — pricing the Xet conflict — 2026-08-30
+
+*Does publishing a coded archive to a content-addressed hub trade away
+cross-revision dedup? `strategy.md` §2b assumed the public-hub download was a
+clean win without pricing that. It mostly survives, and the reason is not the
+one the question assumes.*
+
+### CDC on plain bytes catches tensor duplication completely
+
+`/mnt/d/Models/Llama-3.1-8b-Instruct` ships the same weights twice — 16.06 GB of
+safetensors and a 16.06 GB `original/consolidated.00.pth`, which is a zip with
+**all 295 members stored uncompressed**, so the tensor bytes are present
+verbatim at different offsets. That is the sharpest available test of whether
+byte-level chunking catches what tensor-level dedup catches.
+
+Content-defined chunking at ~64 KB (windowed gear sum, 99% shift-resistant on a
+one-byte insertion) over the largest `.pth` member and the safetensors shard
+holding the same tensor:
+
+| | chunks |
+|---|---|
+| `.pth` member `data/0`, 1.05 GB | 12,097 |
+| safetensors shard 1, 4.98 GB | 57,731 |
+| **shared** | **12,095 — 100.0%** |
+
+The two misses are the boundary chunks at each end, where surrounding context
+differs. **So Xet's dedup does catch cross-container duplication**, and lmz's
+64.6% directory figure is not something CDC would miss.
+
+*Method note:* a first chunker used a single-byte gear predicate and produced
+**zero** boundaries — with a 256-entry table the condition depends on the byte
+*value*, not the position, so either a value cuts everywhere or nowhere. It
+would have reported "CDC finds no duplication" for a reason unrelated to the
+data. Replaced with a windowed sum before any result was taken.
+
+### But coded archives dedup across revisions too, which the question assumes away
+
+The premise is that entropy-coded bytes do not chunk-dedup. That is false for
+the case that matters. lmz chunks **fixed spans of plaintext**, so a
+shape-preserving edit — the normal shape of a fine-tune or a re-quantisation —
+leaves every untouched chunk byte-identical after coding. 151 MB model, edits
+made in place:
+
+| edit | plain bytes changed | coded chunks new |
+|---|---|---|
+| largest tensor replaced | 52.7% | **52.7%** |
+| one byte flipped | 0.0% | 0.7% |
+| 4 KB at the head of all 167 tensors | 0.3% | **32.2%** |
+
+For a **localised** edit, coded chunks track plain changes one-for-one and lmz
+dedups exactly as well as CDC. For a **scattered** edit it is worse, and the
+mechanism is chunk granularity: touching one byte rewrites its whole coded
+chunk, so the change is amplified by roughly the ratio of coded chunk size to
+CDC chunk size.
+
+### The amplification is a dial, and it is the encoder's chunk size
+
+Same scattered edit (0.30% of bytes, across 167 tensors):
+
+| lmz chunk | ratio | coded chunks new | amplification |
+|---|---|---|---|
+| **64 KiB** | 0.453 | **3.3%** | **10.8×** |
+| 256 KiB | 0.435 | 12.6% | 42.1× |
+| 1 MiB | 0.432 | 32.2% | 107.2× |
+| 4 MiB | 0.434 | 50.0% | 166.5× |
+
+Matching Xet's own granularity costs **2.1 points of ratio** and cuts the
+amplification tenfold.
+
+### The crossover
+
+For `R` revisions sharing a base, plain change fraction `c` per revision, coded
+ratio `f`, amplification `A`:
+
+    plain on a CDC hub   N · (1 + (R-1)·c)
+    coded archives       f·N · (1 + (R-1)·c·A)
+
+    coded wins while     R  <  1 + (1 - f) / (c · (f·A - 1))
+
+**This box's instance**, at `c` = 0.003 measured above:
+
+| lmz chunk | f | A | coded wins up to |
+|---|---|---|---|
+| 1 MiB | 0.432 | 107 | **~5 revisions** |
+| 64 KiB | 0.453 | 10.8 | **~48 revisions** |
+
+So **the public-hub case survives**, and §2b does not need reordering. A first
+download of any single revision is a clean win for coding regardless — Xet's
+dedup buys nothing on a cold fetch, only on an update. The conflict is real only
+for a user tracking many revisions of one model, and even then the encoder's
+chunk size moves the crossover by an order of magnitude for two points of ratio.
+
+### Conditions
+
+One model family, one dtype, edits synthesised rather than taken from real
+consecutive releases — `c` for actual fine-tune revisions is unmeasured and is
+the input the crossover is most sensitive to. `/mnt/d` reads at 0.20 GB/s, which
+is why this used bounded samples rather than all 32 GB.

@@ -105,6 +105,16 @@ someone has to publish the archive. That splits it in two:
 The second is immediately actionable and is the right Phase 0.5. The first is
 worth wanting and should not block anything.
 
+**Priced against Xet, 2026-08-30, and it survives.** hf_xet chunks at ~64 KB and
+dedups across revisions, which looks like it should beat one-shot coding for
+anyone tracking a model. Measured: CDC does catch tensor duplication completely
+(100% of chunks shared across two containers holding the same weights), but the
+premise that coded bytes cannot dedup is false — lmz chunks fixed spans of
+*plaintext*, so a shape-preserving edit leaves untouched chunks byte-identical
+after coding. Coding wins outright on any cold fetch, and up to **~5 revisions**
+at 1 MiB chunks or **~48** at 64 KiB, which costs 2.1 points of ratio. Crossover
+formula and conditions in `MEASURED.md`.
+
 ## 3. The metric is wrong, and fixing it is the differentiator
 
 Every number in `MEASURED.md` is GB/s. Nobody starting a model cares about GB/s;
