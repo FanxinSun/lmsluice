@@ -107,11 +107,37 @@ same bytes lmz's directory-level dedup attacks. Two consequences:
 
 - **Xet already took the easy half of the download win** on the public hub, and
   took it at the storage layer where no user has to install anything.
-- **Compression and CDC dedup fight each other.** Entropy-coded bytes do not
-  chunk-dedup: compress a shard and Xet's 64 KB chunk boundaries stop matching
-  across versions. A published lmz archive would *lose* Xet's cross-version
-  dedup to gain lmz's ratio. That trade is winnable — 34.7% beats 14.8% — but
-  it is a trade, and nothing in this repository has priced it.
+- **Compression and CDC dedup fight each other far less than this section
+  originally claimed.** It said entropy-coded bytes do not chunk-dedup, so a
+  published archive would lose Xet's cross-version dedup to gain lmz's ratio.
+  That has now been measured and it is false for the case that matters. lmz
+  chunks fixed spans of *plaintext*, so a shape-preserving edit — the normal
+  shape of a fine-tune — leaves every untouched chunk byte-identical after
+  coding: replacing the largest tensor changed 52.7% of plain bytes and exactly
+  **52.7%** of coded chunks.
+
+  Scattered edits are amplified instead, by roughly the ratio of coded chunk
+  size to CDC chunk size — **and that ratio is a dial the encoder holds**. On the
+  same 0.30% scattered edit, 1 MiB chunks amplify 107× while 64 KiB chunks
+  amplify 10.8×, for 2.1 points of ratio.
+
+  Coded wins while `R < 1 + (1-f)/(c·(f·A - 1))` for `R` revisions sharing a
+  base and plain change fraction `c`: about **5 revisions** at 1 MiB chunks and
+  about **48** at 64 KiB. **Both figures come from one measured `c` of 0.30%** —
+  they are one assumption reported twice, not two results, and `c` for real
+  consecutive fine-tune releases is unmeasured and is the input the crossover is
+  most sensitive to. A cold fetch of any single revision is a clean win for
+  coding either way, since dedup buys nothing when you hold nothing.
+  `MEASURED.md` has the method, including a chunker bug that would have
+  confirmed the original hypothesis for a reason unrelated to the data.
+
+**What the 64.6% is worth depends on where it is published.** Against plain
+storage it stands. On a **Xet-backed hub specifically it overstates the
+advantage**, because content-defined chunking already dedups the duplicate
+representation for nothing — measured at 100% of chunks shared between a
+safetensors directory and the uncompressed-zip `.pth` holding the same weights.
+Against Xet, lmz's marginal contribution is the 34.7% shard figure and not the
+64.6% one.
 
 Also note **KAITO already switched its OCI layers to zstd** for exactly the
 reason `zstdcodec.py` exists. The "nothing installed" argument is not unique;
@@ -123,7 +149,7 @@ what is unique is deciding per machine whether to use it.
 
 | | ratio on BF16 LLM weights | decode throughput (their hardware) | GPU decode | notes |
 |---|---|---|---|---|
-| **lmz** | **34.7% saved** (Llama-3.1-8B shards); **64.6%** whole directory with dedup | 1.03–1.07 GB/s through lmsluice, 8–16 threads (9800X3D, WSL2, CRC on); 418 GB/s CUDA shared-table (RTX 5080) | **yes** | joint-entropy bound is 35.0% — 0.3 points away |
+| **lmz** | **34.7% saved** (Llama-3.1-8B shards); **64.6%** whole directory with dedup — but see the note below on what that is worth on a Xet-backed hub | **5.95 GB/s** through lmsluice, 8 threads, `CODEC_BF16` at 1 MiB chunks (9800X3D, WSL2, CRC on); 0.97 GB/s for `CODEC_BF16C` at 8 MiB, which is the same library on the same data; 418 GB/s CUDA shared-table (RTX 5080) | **yes** | joint-entropy bound is 35.0% — 0.3 points away |
 | **ZipNN** | 33.6% saved (published, same model) | **1.66 GB/s single-thread**; **up to 80 GB/s @ 16 workers** (Xeon Platinum 8480+, 224 cores, dual NUMA) | "on the way" | integrations shipped: HF `from_pretrained` plugin, safetensors monkey-patch, vLLM, sglang |
 | **ZipLLM** (research) | **54.1%** across 3,048 models / 43.19 TB — tensor-level dedup + **BitX delta** against the base model + zstd | 7.9 GB/s decompress, 5.9 GB/s ingest | no | finds 99.64% of hub models are fine-tunes; argues tensor-boundary dedup needs 923K hashes where CDC needs 520M |
 | **DFloat11** | ~30% saved (BF16 → ~11 bits) | GPU kernel, decompresses per transformer block **during inference** | **yes, resident** | 1.9–38.8× throughput vs CPU offload; 5.3–13.17× longer context at fixed VRAM |
