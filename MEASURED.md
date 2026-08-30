@@ -90,12 +90,24 @@ Not measured here — carried from lmz, whose own benchmarks produced them:
   dependent shared-memory loads. It is the right order of magnitude and the
   wrong unit; treat the estimated decode rates in the README as a reason to
   measure, never as a result.
+- **The one decode number here does not identify which resource bound it.**
+  418 GB/s on the 5080 is simultaneously 84% of that card's bandwidth bound
+  and exactly its compute bound at `k = 128` FLOP-equivalents per decoded
+  byte. A single point on a single device cannot separate the two, and the
+  separation is worth 8× on a small iGPU. `../gate.py` carries both readings
+  as an interval rather than picking one; pinning `k` needs a decode
+  measurement on a low-FLOP/byte device, or a sweep that moves one axis
+  (clocks against memory clocks, or a stream with a different `f`) on this
+  one.
 - Decode timings quoted anywhere in this tree should be **medians of several
   runs**. A single decode on this box varied by 40% between runs while other
   things were running.
-- The 780M and M4 Pro rows in the README are **compute-scaled from the
-  measured CUDA kernel**, not run. No Radeon 780M and no Apple silicon has
-  been through this probe.
+- The 780M, Apple, Strix Halo and phone rows in the README are **arithmetic
+  from public specifications**, not runs — no Radeon 780M and no Apple
+  silicon has been through this probe. Earlier they were compute-scaled from
+  the measured CUDA kernel, which additionally assumed that kernel was
+  compute-bound; `../gate.py` no longer assumes it, and the rows are now
+  intervals.
 
 ## How to re-run it
 
