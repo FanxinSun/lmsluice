@@ -3,3 +3,6 @@ __pycache__/
 *.lmz
 log.txt
 results/
+
+# Built by devdecode.py on first use if nvcc is present.
+lmsluice/*.ptx

@@ -20,7 +20,7 @@ import sys
 import time
 
 from . import __version__
-from .plan import gate, write_plan
+from .plan import gate_ratio, write_plan
 from .probe import SAMPLE, encode_rate
 from .probe import run as probe_run
 from .rates import Profile, age, cache_dir, storage_key
@@ -82,6 +82,13 @@ def _show_profile(p: Profile) -> None:
               f"{b.get('entropy')}, gpu {b.get('gpu')}")
     print(f"\nstorage {'key':<14} {'cold':>7} {'warm':>7} {'write':>7}  GB/s")
     for key, s in p.storage.items():
+        if key == "pcie":
+            # Not a disk, and the cold/warm columns mean something else here:
+            # pinned and pageable. Printed in its own row rather than being
+            # squeezed into headings that would misname both numbers.
+            print(f"        {'pcie':<14} {_gb(s.cold)} {_gb(s.warm)}"
+                  f" {'  --  ':>7}   (pinned / pageable; {s.method})")
+            continue
         note = []
         if s.layered:
             note.append("layered cache below: cold holds on first touch only")
@@ -99,8 +106,10 @@ def _show_profile(p: Profile) -> None:
               f"   ({c.threads} threads, on {os.path.basename(c.archive)})")
 
     for key, s in p.storage.items():
+        if key == "pcie":
+            continue        # the PCIe gate belongs to the VRAM plan, not here
         for c in p.codecs.values():
-            g = gate(c.decode, s.source)
+            g = gate_ratio(c.decode, s.source)
             if g is None:
                 continue
             verdict = ("compression is free on this path"
@@ -152,6 +161,15 @@ def cmd_plan(args) -> int:
             print(d.explain())
         else:
             print(m.plan.explain())
+        if m.route == "coded":
+            try:
+                from .devdecode import advice
+
+                tip = advice(m._arc)
+            except Exception:             # noqa: BLE001
+                tip = ""
+            if tip:
+                print(f"\n  note: {tip}")
     return 0
 
 
@@ -197,24 +215,40 @@ def cmd_bench(args) -> int:
     profile = _profile(args)
     pairs = [(args.target, None)] if args.against is None else \
             [(args.target, args.against)]
+    cold_warned = False
     for target, other in pairs:
         results = {}
         for path in [p for p in (target, other) if p]:
             with open_model(path, profile=profile) as m:
                 times = []
                 for i in range(args.reps):
-                    if args.cold and isinstance(getattr(m, "_src", None), FileSource):
-                        m._src.uncache()
-                    elif args.cold and m._arc is not None \
-                            and isinstance(m._arc.source, FileSource):
-                        m._arc.source.uncache()
-                    buf = bytearray(m.plain_bytes)
-                    t = time.perf_counter()
-                    m.load(into=buf)
-                    times.append(time.perf_counter() - t)
-                    del buf
+                    if args.cold:
+                        # Say so when the drop fails, rather than labelling the
+                        # run "cold" because the flag was passed.
+                        src = (m._src if isinstance(getattr(m, "_src", None),
+                                                    FileSource)
+                               else getattr(m._arc, "source", None))
+                        if isinstance(src, FileSource):
+                            ok, how = src.uncache()
+                            if not ok and not cold_warned:
+                                print(f"  --cold could not drop the cache: "
+                                      f"{how}; these runs are warm",
+                                      file=sys.stderr)
+                                cold_warned = True
+                    if args.to_device:
+                        t = time.perf_counter()
+                        dev = m.to_device()
+                        times.append(time.perf_counter() - t)
+                        dev.close()
+                    else:
+                        buf = bytearray(m.plain_bytes)
+                        t = time.perf_counter()
+                        m.load(into=buf)
+                        times.append(time.perf_counter() - t)
+                        del buf
                 best = min(times)
-                results[m.route] = (best, m.plain_bytes, m.plan, times)
+                plan = m.device_plan() if args.to_device else m.plan
+                results[m.route] = (best, m.plain_bytes, plan, times)
                 print(f"{os.path.basename(path):<28} {m.route:<6} "
                       f"{m.plain_bytes / best / 1e9:5.2f} GB/s  "
                       f"best of {args.reps}  "
@@ -223,7 +257,9 @@ def cmd_bench(args) -> int:
             pt = results["plain"][0]
             ct = results["coded"][0]
             measured = pt / ct
-            predicted = results["coded"][2].decision.speedup
+            got = results["coded"][2]
+            predicted = (got.speedup if hasattr(got, "speedup")
+                         else got.decision.speedup)
             print(f"\n  measured  coded is {measured:.2f}x the plain route")
             if predicted:
                 print(f"  predicted            {predicted:.2f}x")
@@ -251,16 +287,66 @@ def cmd_write(args) -> int:
     return 0
 
 
+def cmd_cache(args) -> int:
+    """Say whether a local coded copy would pay, and build it if asked."""
+    from . import cache
+
+    if args.list:
+        rows = cache.entries()
+        if not rows:
+            print("cache is empty")
+            return 0
+        print(f"{'codec':<6} {'plain':>10} {'coded':>10} {'ratio':>6}  source")
+        for m in rows:
+            print(f"{m['codec']:<6} {_bytes(m['plain_bytes']):>10} "
+                  f"{_bytes(m['coded_bytes']):>10} "
+                  f"{m['coded_bytes'] / max(1, m['plain_bytes']):>6.3f}  "
+                  f"{m['source']}")
+        return 0
+    if args.clear:
+        print(f"removed {cache.clear(args.target)} entries")
+        return 0
+    if not args.target:
+        print("cache: give a model, or --list / --clear", file=sys.stderr)
+        return 1
+
+    v = cache.worth_caching(args.target, _profile(args))
+    print(v.explain())
+    if not args.build:
+        if v.worth_it:
+            print("  (pass --build to make it)")
+        return 0
+    if not v.worth_it:
+        print("  refusing to build a cache the gate says would not help; "
+              "pass --codec explicitly if you want it anyway", file=sys.stderr)
+        return 1
+    started = time.perf_counter()
+    entry = cache.build(args.target, codec=args.codec)
+    print(f"  built in {time.perf_counter() - started:.1f}s -> "
+          f"{_bytes(os.path.getsize(entry))} at {entry}")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     p = Profile.load(args.profile)
     print(f"lmsluice {__version__}")
-    try:
-        from ._lmz import lmz
+    from .lmzcodec import backend_info
 
-        m = lmz()
-        print(f"lmz  {m.__version__}  {m.backends()}")
-    except ImportError as exc:
-        print(f"lmz  not available: {exc}")
+    codec = backend_info()
+    if codec.get("version"):
+        print(f"codec {codec['name']} {codec['version']}  {codec.get('backends')}")
+    else:
+        print(f"codec {codec['name']} not available: {codec.get('error')}")
+    from . import cuda
+
+    ok, why = cuda.available()
+    if ok:
+        info = cuda.device_info()
+        print(f"cuda {info['name']} sm_{info.get('cc_major','?')}"
+              f"{info.get('cc_minor','')} · "
+              f"{info['total_bytes'] / 1e9:.1f} GB")
+    else:
+        print(f"cuda not usable: {why}")
     print(f"cache {cache_dir()}")
     if p is None:
         print("\nno profile for this machine. run:  lmsluice probe <a model file>")
@@ -310,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("bench", help="run both routes and check the plan")
     p.add_argument("target")
+    p.add_argument("--to-device", action="store_true",
+                   help="load into VRAM rather than host RAM")
     p.add_argument("--against", help="the other form of the same model")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--cold", action="store_true",
@@ -321,6 +409,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--measure", action="store_true", help="re-measure the encoder")
     p.add_argument("--sample", type=int, default=SAMPLE)
     p.set_defaults(func=cmd_write)
+
+    p = sub.add_parser("cache", help="compress a model locally, where it pays")
+    p.add_argument("target", nargs="?", help="a plain model file")
+    p.add_argument("--build", action="store_true",
+                   help="build the entry (otherwise only says whether it pays)")
+    p.add_argument("--codec", default="auto", choices=("auto", "lmz", "zstd"))
+    p.add_argument("--list", action="store_true")
+    p.add_argument("--clear", action="store_true")
+    p.set_defaults(func=cmd_cache)
 
     p = sub.add_parser("doctor", help="what is measured and what is active")
     p.set_defaults(func=cmd_doctor)
