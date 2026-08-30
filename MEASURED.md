@@ -1238,8 +1238,24 @@ disk, and every container on such a VM. It is not a property of this hardware.
 
 **The consequence is not local to this repository.** Any "cold" storage figure
 taken inside such a guest by dropping the guest's cache is measuring the host's
-cache. `MEASURED.md`'s own earlier cold rates, and `probe/`'s, were taken that
-way. They are upper bounds on cold, not cold.
+cache. This file's own earlier cold rates, and `probe/`'s, were taken that way.
+They are upper bounds on cold, not cold.
+
+**Read that as a bound with a direction, and not as more than that.** It says
+those figures were *no slower* than the truth, so gate verdicts derived from them
+were conservative — compression pays at least as often as they implied. It does
+**not** say by how much, and nothing available here can: the drift in the next
+section means the true rate was not pinned even once. A slower true link makes
+this project look better on more machines, which is exactly the direction that
+does not feel like an error, so the bound is stated and the magnitude is not.
+
+**And for a workload actually running in such a guest, the host cache is not an
+artefact — it is that machine's performance.** A user loading a model under WSL2
+gets those 6 GB/s. The host cache is a measurement problem only when the thing
+being characterised is the *storage device*, which is what the gate needs, since
+the gate must predict for machines whose caches are cold. So both numbers are
+real and they answer different questions: the guest-warm rate is what a WSL2 user
+experiences, the device rate is what the gate must compare a decoder against.
 
 ### The protocol that does work, and what it does not evict
 
@@ -1297,3 +1313,44 @@ Below the 1.49× the ratio alone allows, which is the same "predicted in
 direction, short in degree" gap the front page already reports warm. The verdict
 reverses from the warm case, and it reverses in the direction the gate predicts:
 at a link this slow, compression pays.
+
+
+---
+
+## Two methodological notes this file earned the hard way — 2026-08-30
+
+Recorded here rather than in `CLAUDE.md`, which is not mine to edit.
+
+### A result that beats a hard ceiling is a broken measurement, not a good one
+
+Where the model gives a bound that cannot physically be exceeded, exceeding it is
+a fault in the comparison — and that can be known **before** anything explains
+it, from one device, with no second machine to check against.
+
+The instance: a coded route carrying `f` of the bytes cannot beat plain by more
+than `1/f` when both are link-bound. At `f` = 0.673 that ceiling is 1.49×, and it
+discarded six of ten measured pairs reading 1.69× to 6.96×. The explanation came
+afterwards and was not needed to reject them.
+
+It has now caught four separate errors in this repository — the "6× tax" that
+paired the fastest plain read with the slowest coded one, a `shutil.copyfile`
+baseline on 9p, a 2.99× write win, and those six pairs. Every one of them was an
+error **in this project's favour**. That is the pattern worth internalising: a
+number that flatters the thing you are building does not feel like a bug, so the
+arithmetic ceiling has to do the work that suspicion would otherwise do.
+
+### Two questions this machine cannot answer, and they are the same kind
+
+Both are *different hardware*, not *more work*, and neither is closable by
+effort here:
+
+| question | why this box cannot answer it |
+|---|---|
+| the 2-CU adapter's shared-memory **pool per compute unit** | Exposed by no interface that adapter offers: core Vulkan has no such query, and `VK_AMD_shader_core_properties` and `shader_core_properties2` — both present, both queried — carry no LDS field. Obtainable only by running the kernel on the device. |
+| a true **cold storage rate** | Every read here is served by a host cache the guest cannot address or evict. Obtainable only on storage that is not behind one: a native Linux box, or this one without the hypervisor. |
+
+They bound the same claim from opposite ends — the first sets how fast a small
+iGPU decodes, the second how slow the link it is racing actually is — and the
+gate is the comparison between them. So the one measurement that would most
+change what this project knows is not a better analysis of this machine. It is
+either of these on a different one.
