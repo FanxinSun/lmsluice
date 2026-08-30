@@ -15,9 +15,9 @@ hundred.**
 
 | link | GB/s | verdict |
 |---|---|---|
-| NVMe, warm in the host cache | 6.2 | **tax**, 0.17× |
-| NVMe, first touch | 2.4 | tax, 0.44× |
-| UFS 4.0 (phone flash) | 4.0 | tax, 0.26× |
+| NVMe, warm in the host cache | 6.2 | break-even |
+| NVMe, first touch | 2.4 | **pays** |
+| UFS 4.0 (phone flash) | 4.0 | **pays** |
 | **9p / network mount** | **0.26** | **pays** |
 | **SATA SSD** | 0.55 | **pays, ratio-capped** |
 | **eMMC / SD / USB** | 0.30 | **pays, ratio-capped** |
@@ -25,10 +25,18 @@ hundred.**
 | **a download** | 0.01 – 0.1 | **pays, and see below** |
 
 So the value is very nearly a function of one variable: **how slow the link
-is.** This is for every machine that is not reading from a fast local NVMe —
-most laptops, every phone, every network mount, every container pulling from
-object storage, and every download. On a fast local NVMe it will tell you to
-use the plain file, which is the point.
+is.** Measured at 16 threads with lmz's field-split codec, the crossover sits
+around **8.3 GB/s of storage** — above almost everything anyone reads a model
+from, which is why the verdict is "pays" nearly everywhere and break-even on a
+warm local NVMe.
+
+**A correction, because this page used to say otherwise.** It claimed an archive
+"costs you 6× on load time" on a fast NVMe. That figure paired the fastest plain
+measurement with the slowest coded one, and the coded one used a chunk size that
+reaches lmz's conditioned codec — which decodes **6.1× slower** than its field
+split on the same data. With the chunk size this package now writes, the same
+machine measures **0.94× — break-even**, and still saves 33% of the disk.
+`MEASURED.md` has both numbers and the comparison that was wrong.
 
 **Measured, not asserted** — a 1 GiB BF16 model over a 9p mount, cache dropped
 before every run, byte-identical. That mount is one sample of the sub-1-GB/s

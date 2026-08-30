@@ -882,3 +882,84 @@ bytes*. On a fast NVMe it declines and says the plain file is the right cache
 entry. Nothing is cached without being asked, nothing is deleted, and an entry is
 bound to its source's path, size and mtime so an edited checkpoint misses rather
 than serving stale weights.
+
+## The decode rate this file published was one codec's, not lmz's — 2026-08-30
+
+*A correction to numbers used throughout this file and the README. Found while
+normalising a competitor comparison, which is the value of doing one.*
+
+Same library, same machine, same 1.87 GB BF16 fixture, same transport. Only the
+encoder's chunk size differs, and with it which codec lmz reaches:
+
+| archive | codec | chunk | decode |
+|---|---|---|---|
+| `m.default.lmz` | `CODEC_BF16C` (conditioned) | 8 MiB | **0.97 GB/s** |
+| `llama.cs1m.lmz` | `CODEC_BF16` (field split) | 1 MiB | **5.95 GB/s** |
+
+**6.1× on a codec parameter** — larger than any difference between the products
+this repository compares itself against. Every "lmz decodes at about 1.05 GB/s"
+above is the first row, presented as lmz's rate.
+
+### Decode alone, from RAM, threads swept
+
+Payloads pre-loaded so no I/O is in these numbers; plain bytes per second.
+lmz `CODEC_BF16`, 1 MiB chunks, 400 chunks / 418 MB:
+
+| threads | CRC on | CRC off |
+|---|---|---|
+| 1 | 0.95 | 1.09 |
+| 4 | 3.66 | 4.18 |
+| 8 | 6.75 | 7.91 |
+| 16 | **8.29** | **10.41** |
+
+Near-linear to 16 threads; checksums cost 15–20%. Repeated writing into a
+distinct 418 MB buffer rather than a reused 1 MiB scratch, in case the scaling
+was cache residency: **8.23 GB/s, unchanged.** So it is not an artefact.
+
+Through lmsluice's own transport on the same archive: **5.95 GB/s**, so the
+transport delivers 72% of the codec — a real gap, and not the order of magnitude
+the old figure implied.
+
+For comparison, stdlib zstd on the same data: 0.77 GB/s at one thread, 1.69 at
+eight and sixteen. Flat past eight, as the earlier section found.
+
+### End to end, and the claim it corrects
+
+Local NVMe, cache dropped each run, n=7, median, every result byte-identical:
+
+| | seconds | GB/s | vs plain |
+|---|---|---|---|
+| plain safetensors | 0.967 | 1.94 | — |
+| coded, BF16C 8 MiB | 2.508 | 0.75 | 0.39× |
+| coded, BF16 1 MiB | 1.030 | 1.82 | **0.94×** |
+
+On the machine this repository calls the case where compression is a tax, it is
+**break-even** with the right chunk size — and still saves 33% of the disk.
+
+**The published "6× tax" was worse than a stale number: it paired the fastest
+plain measurement (6.2 GB/s, host-cache-warm) with the slowest coded one
+(BF16C).** Two legitimate figures, one indefensible comparison. It is corrected
+here and on the front page rather than defended.
+
+### The crossover, as a formula
+
+    decode(T) ≈ min(T × 0.52,  8.3) GB/s   lmz CODEC_BF16, CRC on, 1 MiB
+    decode(T) ≈ min(T × 0.60, 10.4) GB/s   same, CRC off
+    decode(T) ≈ min(T × 0.77,  1.7) GB/s   stdlib zstd, 1 MiB blocks
+    decode(T) ≈ min(T × 0.06,  1.0) GB/s   lmz CODEC_BF16C, 8 MiB
+
+    compression pays when decode(T_available) > link
+    the win is min(1/f, decode/link)
+
+**This box at 16 threads:** the crossover moves from ~1.0 GB/s (published, BF16C)
+to **~8.3 GB/s**. This machine's storage reads 2.4 cold and 6.2 warm, so both now
+sit below it.
+
+The 1 MiB chunk size was chosen to keep archives GPU-decodable at 0.2 points of
+ratio. It buys 6× on CPU decode as well, which was not known when it was chosen.
+
+### Conditions
+
+Decode-only, from RAM. An end-to-end load also reads the coded bytes, which is
+why the measured 0.94× sits below the 1.49× the ratio alone allows. One machine,
+one dtype, one checkpoint.
