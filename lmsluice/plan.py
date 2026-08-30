@@ -118,13 +118,14 @@ class Route:
 
     @property
     def device_bytes(self) -> int:
-        """Bytes that actually cross the storage or the network.
+        """Bytes that actually cross a link -- storage, network or PCIe.
 
         The other number a route is judged on, and the one that does not
         depend on any measurement: it is why a slower route is sometimes still
         the right one, on a metered link or a full disk.
         """
-        return sum(s.nbytes for s in self.stages if s.name in ("read", "write"))
+        return sum(s.nbytes for s in self.stages
+                   if s.name in ("read", "write", "pcie"))
 
 
 @dataclass(frozen=True)
@@ -233,8 +234,76 @@ def _decide(routes, device: float | None, codec: float | None,
     return Decision(plain, routes, speedup, False, why, margin)
 
 
-def gate(codec_rate: float | None, device_rate: float | None) -> float | None:
-    """The one ratio. Above 1, compression is free on this path."""
+def vram_plan(plain_bytes: int, coded_bytes: int | None, *,
+              source: float | None, pcie: float | None,
+              host_decode: float | None = None,
+              device_decode: float | None = None,
+              margin: float = MARGIN) -> Decision:
+    """Choose how to get a model into device memory.
+
+    Two links now, not one -- storage and PCIe -- and the route decides how many
+    bytes cross each. That is what makes this different from `read_plan` rather
+    than a longer version of it:
+
+        plain          max(N/L,  N/P)              N over both
+        host-decode    max(fN/L, N/Dh, N/P)        fewer off disk, all of it over PCIe
+        device-decode  max(fN/L, fN/P, N/Dd)       fewer over BOTH, decoded where it lands
+
+    `device-decode` is the only route that shortens both links, and it is also
+    the only one whose decode is not competing with the host for memory
+    bandwidth. That is the whole argument for a GPU decoder on the load path,
+    and it is why the interesting number is not the decoder's headline rate but
+    the ratio: a decoder 14x faster than PCIe converts every point of the
+    archive's ratio into load speed and nothing beyond that helps.
+
+    `host-decode` is priced even where it loses, because on a machine with no
+    device decoder it is the only coded route there is -- and it loses here for
+    the same reason the CPU route loses on the storage path, which is one fact
+    rather than two.
+    """
+    routes = [Route("plain", (Stage("read", plain_bytes, source),
+                              Stage("pcie", plain_bytes, pcie)))]
+    if coded_bytes is not None:
+        routes.append(Route("host-decode",
+                            (Stage("read", coded_bytes, source),
+                             Stage("decode", plain_bytes, host_decode),
+                             Stage("pcie", plain_bytes, pcie))))
+        routes.append(Route("device-decode",
+                            (Stage("read", coded_bytes, source),
+                             Stage("pcie", coded_bytes, pcie),
+                             Stage("decode", plain_bytes, device_decode)),
+                            note="decoded in VRAM"))
+    known = [r for r in routes if r.seconds is not None]
+    if len(known) < 2:
+        why = ("not enough of the path has been measured to compare routes; "
+               "the plain one is taken as the one that cannot be wrong")
+        return Decision(routes[0], tuple(routes), None, False, why, margin)
+    # Ties broken by bytes moved. Two routes that finish together are not
+    # equivalent: the one that puts less on the wire leaves more of a shared
+    # disk, a metered link and a contended PCIe bus for everything else.
+    best = min(known, key=lambda r: (r.seconds, r.device_bytes))
+    speedup = routes[0].seconds / best.seconds
+    if best is routes[0] or speedup < margin:
+        loser = min((r for r in known if r is not routes[0]),
+                    key=lambda r: r.seconds)
+        return Decision(routes[0], tuple(routes), speedup,
+                        speedup <= 1 / margin,
+                        f"no coded route clears the {margin:.2f}x margin; the "
+                        f"best is {loser.name} at {routes[0].seconds / loser.seconds:.2f}x",
+                        margin)
+    return Decision(best, tuple(routes), speedup, True,
+                    f"{speedup:.2f}x faster than plain, limited by "
+                    f"{best.limited_by}", margin)
+
+
+def gate_ratio(codec_rate: float | None, device_rate: float | None) -> float | None:
+    """The one ratio. Above 1, compression is free on this path.
+
+    Named `gate_ratio` rather than `gate` because `lmsluice.gate` is a module --
+    the curve for devices that are not present -- and a function shadowing a
+    submodule of the same name is a collision that resolves differently
+    depending on import order.
+    """
     if not codec_rate or not device_rate:
         return None
     return codec_rate / device_rate
