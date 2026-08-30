@@ -266,10 +266,29 @@ WSL2 at all — enumeration there returns a software rasteriser and nothing else
 
 So the row still gets **no compute term**, the same as any unprobed device. But
 the pool is not unbounded below: **`pool ≥ cap` is forced**, because a unit that
-could not hold one legally-sized workgroup could never schedule one. That gives a
-floor of one block per CU, and with two CUs queried off the device, a floor of
-**≥ 3.4 GB/s against the CPU decoder's 2.0 — at least 1.7×**, more if the pool is
-the documented 64 KiB per CU.
+could not hold one legally-sized workgroup could never schedule one. That is a
+proof, not an estimate, and it turns the pessimistic substitution into a *floor*
+where it had been serving as a ceiling.
+
+The floor is best stated without a clock, because the clock is the weakest input
+here — 2.2 GHz derived from an FMA measurement, not queried — and the compute
+term is linear in it across the whole relevant range (bandwidth would only bind
+above 16.8 GHz):
+
+> **The floor is 1.55 GB/s per GHz of engine clock, and it exceeds the CPU
+> decoder's 2.0 GB/s for any clock above 1.29 GHz.**
+
+Every AMD integrated part of the last several generations boosts well clear of
+that, so the claim is robust rather than contingent — and a reader can check it
+against their own adapter without trusting our clock. At 2.2 GHz it is 3.4 GB/s,
+1.7× the CPU decoder.
+
+**The floor is conservative twice over, and both point the same way.** The pool
+is taken as *equal* to the cap, its smallest legal value; and the cap itself is
+under-reported, because on the reference card Vulkan says 49,152 where CUDA's
+opt-in cap is 101,376 — Vulkan reports the non-opt-in limit. If this adapter's
+real opt-in cap is 64 KiB rather than the 32,768 Vulkan gives, residency doubles
+again. So the true value sits above this floor rather than scattered around it.
 
 **That floor is arithmetic, not evidence.** It inherits every assumption above
 it, and two are unverified at exactly this scale — whether decode stays linear in

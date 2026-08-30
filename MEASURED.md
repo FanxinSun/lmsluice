@@ -1205,3 +1205,95 @@ regressions were introduced deliberately to confirm the guard fires: dropping
 ~2× pessimistic on this box.** The gate verdicts do not move -- both routes paid
 the allocation equally -- with the one exception noted above, that coded against
 plain widens from 1.13× to 1.24× once the shared overhead is gone.
+
+---
+
+## Every "cold" number this project took on WSL2 was a host cache — 2026-08-30
+
+The blocker named in the last section turned out not to be what it looked like.
+`posix_fadvise(DONTNEED)` works here; it was never the problem.
+
+### The mechanism, and the parameters it depends on
+
+**There are two caches, and only the upper one is addressable from Linux.**
+`mincore()` reports, page by page, whether a file is resident in the Linux page
+cache. After `fadvise(DONTNEED)` it reports **0.00% of 457,245 pages resident** —
+the drop worked — and the very next read still returns **~6 GB/s**. Bytes that
+are not in Linux memory are not coming off an NVMe at 6 GB/s.
+
+The layer below is the Windows host's cache of the VHDX backing `/dev/sdd`. It is
+invisible to the guest, unaddressable from it, and does not evict on demand:
+
+| unrelated distinct data read first | fixture then reads at |
+|---|---|
+| 0 GB | 4.7 – 5.4 GB/s |
+| 48 GB | 3.19 GB/s |
+| 112 GB | 3.75 GB/s |
+
+112 GB of pressure does not reach it, and more is not better. **The parameters
+this depends on** are: a guest filesystem on virtualised block storage, a host
+with enough free RAM to cache the backing file, and no guest-side interface to
+the host's cache. That is every WSL2 box, every VM on a host with a file-backed
+disk, and every container on such a VM. It is not a property of this hardware.
+
+**The consequence is not local to this repository.** Any "cold" storage figure
+taken inside such a guest by dropping the guest's cache is measuring the host's
+cache. `MEASURED.md`'s own earlier cold rates, and `probe/`'s, were taken that
+way. They are upper bounds on cold, not cold.
+
+### The protocol that does work, and what it does not evict
+
+**It evicts nothing. It reads data nothing has ever read.** A copy written and
+never subsequently read is cold in both caches, because neither has had a reason
+to hold it:
+
+    stage N+2 copies of the fixture, fadvise(DONTNEED) each as it is written
+    read them oldest-first, one per measurement, never twice
+    verify with mincore that Linux residency is 0% before each clock starts
+
+The two newest copies are spares: the most recently written one reads at 2.56
+GB/s against 1.61–1.70 for its predecessors, so roughly 2 GB of subsequent writes
+is enough to clear the write path. Reading oldest-first does that for free.
+
+**It consumes fixtures.** One 1.87 GB copy per measurement, so *n* = 5 on two
+routes costs 12 copies and about 19 GB, and a fixture set buys exactly as many
+measurements as it has copies. When it runs out, the answer is more disk, not
+more reads — re-reading a copy makes it a warm measurement wearing a cold label.
+
+**Conditions, not just contamination.** `/` is mounted with `discard`, so
+deleting a staged set issues inline TRIM, and staging a new one on top of that
+measures the SSD's garbage collector. One run taken straight after a
+delete-and-restage gave plain 0.29 GB/s where a quiesced run gave 1.08. That is a
+property of this box worth recording rather than only designing around.
+
+### What it measured, and what it could not
+
+**The rate is not a stable quantity here.** Same operation, identical
+never-before-read files, Linux residency verified 0% every time, and the rate
+drifts within a single run — 0.26 → 2.38 GB/s ascending in one run, 2.50 → 0.27
+descending in another. Nine pairs, both directions, no protocol variation. So
+**no single cold GB/s figure is published**, and the earlier ones on the front
+page stay marked as predating the destination-buffer change rather than being
+replaced by these.
+
+**The paired ratio survives, because it has a validity check.** Routes were
+interleaved so neither absorbs the drift, and a coded route that moves `f` = 0.673
+of the bytes cannot beat plain by more than `1/f` = **1.49×** when both are
+link-bound. Any pair above that is not a fast archive, it is an unfair comparison
+— the same rule that caught two of this file's earlier measurements:
+
+| pairs | plain GB/s | ratio | |
+|---|---|---|---|
+| 4 | 1.52 – 2.38 | **1.05 – 1.39×** | usable |
+| 6 | 0.26 – 1.46 | 1.69 – 6.96× | **discarded: above 1/f, so impossible** |
+
+The six discarded pairs are all from the low-rate end, where the plain route's
+larger working set — a 1.87 GB destination plus 1.87 GB read, against 1.26 GB
+read — is penalised nonlinearly by whatever is throttling the device. They
+measure that, not the archive.
+
+**Result: cold, the coded route wins, by 1.05 – 1.39× (median 1.14×, n = 4).**
+Below the 1.49× the ratio alone allows, which is the same "predicted in
+direction, short in degree" gap the front page already reports warm. The verdict
+reverses from the warm case, and it reverses in the direction the gate predicts:
+at a link this slow, compression pays.

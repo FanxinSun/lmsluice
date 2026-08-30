@@ -643,11 +643,31 @@ def _table(codec_cost=None) -> None:
                        clock_ghz=small.clock_ghz)
     fl = floor_dev.compute_bound(c)
     fl_lo = min(fl[0], floor_dev.bandwidth_bound(c))
-    print(f"So the smallest integrated GPU AMD ships decodes at NO LESS THAN")
-    print(f"{fl_lo:.1f} GB/s by this model, against the CPU decoder's {cpu:.1f} -- "
-          f"at least {fl_lo/cpu:.1f}x,")
-    print("and more if the pool is the documented 64 KiB. The founding claim")
-    print("survives at its own lower bound rather than at a flattering reading.")
+    # State the floor per GHz rather than at one clock. This device's 2.2 GHz
+    # is derived from an FMA measurement, not queried, and the compute term is
+    # linear in clock across the whole range that matters -- bandwidth would
+    # only bind above 16.8 GHz -- so a number quoted at one clock hides the
+    # weakest input in the row. A slope and a threshold do not.
+    lanes = floor_dev.resident_lanes(c)
+    per_ghz = lanes / c.k_high
+    threshold = cpu * c.k_high / lanes
+    print(f"So the floor is {per_ghz:.2f} GB/s PER GHz of engine clock, and it")
+    print(f"exceeds the CPU decoder's {cpu:.1f} GB/s for any clock above "
+          f"{threshold:.2f} GHz.")
+    print("Every AMD integrated part of the last several generations boosts well")
+    print("clear of that, so the claim is robust rather than contingent -- and a")
+    print("reader can check it against their own adapter without trusting the")
+    print(f"{small.clock_ghz} GHz used here, which is derived from an FMA")
+    print(f"measurement rather than queried. At that clock the floor is "
+          f"{fl_lo:.1f} GB/s, {fl_lo/cpu:.1f}x the CPU decoder.")
+    print()
+    print("THE FLOOR IS CONSERVATIVE TWICE OVER, and both point the same way:")
+    print("  1. the pool is taken as EQUAL to the cap, its smallest legal value;")
+    print("  2. the cap itself is under-reported. On the reference card Vulkan")
+    print("     says 49152 where CUDA's opt-in cap is 101376, so Vulkan reports")
+    print("     the non-opt-in limit. If this adapter's real opt-in cap is 64 KiB")
+    print("     rather than the 32768 Vulkan gives, residency doubles again.")
+    print("So the true value is above this floor, not scattered around it.")
     print()
     print("THAT FLOOR IS ARITHMETIC, NOT EVIDENCE. It inherits every assumption")
     print("above it, and two of them are unverified precisely at this scale:")
