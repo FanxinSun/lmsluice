@@ -84,13 +84,30 @@ def read_rate(src: Source, *, sample: int = SAMPLE,
     """How fast this source delivers, cold if the platform allows it."""
     sample = max(1 << 20, min(sample, src.size))
     regions = _regions(src.size, sample, len(depths) + 2)
-    uncache = getattr(src, "uncache", None)
-    method = uncache() if uncache else ""
+
+    # Two ways to see past a cache, and they are not interchangeable. Dropping
+    # it (Linux, macOS) leaves ordinary reads to do the timing; bypassing it
+    # (Windows, unbuffered handle) does the reading itself. Either gives a cold
+    # number. Neither gives one when it fails, and a failure here must produce
+    # `cold=None` rather than a warm read wearing a cold label.
+    direct = None
+    reader = getattr(src, "direct_reader", None)
+    if reader is not None:
+        direct = reader()
+    if direct is not None:
+        cold_ok, method = True, "unbuffered read (FILE_FLAG_NO_BUFFERING)"
+    else:
+        uncache = getattr(src, "uncache", None)
+        cold_ok, method = uncache() if uncache else (False, "no method on this source")
 
     def timed(region, depth):
-        if uncache:
-            uncache()
         off, length = region
+        if direct is not None:
+            started = time.perf_counter()
+            got = direct.read_at(off, length)
+            return got / (time.perf_counter() - started)
+        if cold_ok:
+            src.uncache()
         return _read_at(src, off, length, depth)
 
     first = timed(regions[0], 1)
@@ -104,7 +121,7 @@ def read_rate(src: Source, *, sample: int = SAMPLE,
 
     again = timed(regions[0], 1)
     layered = None
-    if method:
+    if cold_ok:
         layered = True if again > first * LAYERED_AT else None
         if layered:
             # The sweep above was measured against whatever is underneath, so
@@ -114,11 +131,13 @@ def read_rate(src: Source, *, sample: int = SAMPLE,
             # because the right queue depth does not change with the cache.
             best = max(first, best if best_depth == 1 else first)
     warm = _read_at(src, *regions[0], 1)
+    if direct is not None:
+        direct.close()
 
-    return Storage(key=key or storage_key(src.name), cold=best if method else None,
+    return Storage(key=key or storage_key(src.name),
+                   cold=best if cold_ok else None,
                    warm=warm, layered=layered, depth=best_depth,
-                   method=method or "cannot drop the cache on this platform",
-                   sample_bytes=sample)
+                   method=method, sample_bytes=sample)
 
 
 def write_rate(directory: str, *, sample: int = SAMPLE) -> float | None:
@@ -240,6 +259,49 @@ def decode_rate(archive, *, sample: int = SAMPLE, threads=None,
             arc.close()
 
 
+def pcie_rate(sample: int = 128 << 20, reps: int = 3) -> dict:
+    """Host-to-device rate, pinned and pageable, in bytes per second.
+
+    Both, because the difference is not a detail: a copy out of pageable memory
+    is staged by the driver through its own pinned buffer, so it runs at
+    roughly half the link and cannot overlap anything. A loader that reports
+    the pageable number as "PCIe" has mismeasured the link by 2x; one that
+    reports the pinned number while copying from pageable memory has
+    mispredicted its own route by the same factor. The profile carries both and
+    the plan is told which the transport actually uses.
+    """
+    from . import cuda
+
+    ok, why = cuda.available()
+    if not ok:
+        return {"available": False, "why": why}
+    ctx = cuda.Context()
+    try:
+        info = cuda.device_info()
+        dev = ctx.allocate(sample)
+        out = {"available": True, "device": info["name"],
+               "sample_bytes": sample}
+        with ctx.pinned(sample) as pin, ctx.stream() as stream:
+            times = []
+            for _ in range(reps):
+                started = time.perf_counter()
+                dev.copy_from(pin, stream=stream)
+                stream.synchronize()
+                times.append(time.perf_counter() - started)
+            out["pinned"] = sample / statistics.median(times)
+        pageable = bytearray(sample)
+        times = []
+        for _ in range(reps):
+            started = time.perf_counter()
+            dev.copy_from(pageable)
+            times.append(time.perf_counter() - started)
+        out["pageable"] = sample / statistics.median(times)
+        dev.close()
+        return out
+    finally:
+        ctx.close()
+
+
 def encode_rate(plain_path: str, *, sample: int = SAMPLE,
                 directory: str | None = None) -> tuple[float | None, float | None]:
     """(bytes per second, ratio) for compressing a sample of a plain file.
@@ -250,7 +312,7 @@ def encode_rate(plain_path: str, *, sample: int = SAMPLE,
     write rather than encode alone -- which is the number the write plan wants
     anyway, and is noted here so it is not later quoted as the codec's own.
     """
-    from ._lmz import lmz
+    from .lmzcodec import encoder
 
     directory = directory or os.path.dirname(os.path.abspath(plain_path))
     size = os.path.getsize(plain_path)
@@ -272,7 +334,11 @@ def encode_rate(plain_path: str, *, sample: int = SAMPLE,
                     left -= len(b)
         dst = os.path.join(tmp, "sample.lmz")
         started = time.perf_counter()
-        lmz().compress(src, dst)
+        # No option is named here. Whether to compress at all is this
+        # package's decision; every knob of *how* belongs to the codec, and
+        # naming one would put an encoder-side constant in the transport
+        # layer for the second time.
+        encoder().encode(src, dst)
         elapsed = time.perf_counter() - started
         coded = os.path.getsize(dst)
         return os.path.getsize(src) / elapsed, coded / os.path.getsize(src)
@@ -301,6 +367,17 @@ def run(target: str, *, sample: int = SAMPLE, write: bool = True,
     if _is_archive(target):
         codec = decode_rate(target, sample=sample)
         profile.codecs[codec.name] = codec
+
+    # The second link. Measured unconditionally where a device exists, because
+    # it is a property of the machine rather than of the file, and a plan for a
+    # load into VRAM cannot be priced without it.
+    pcie = pcie_rate()
+    if pcie.get("available"):
+        profile.storage["pcie"] = Storage(
+            key="pcie", cold=pcie["pinned"], warm=pcie["pageable"],
+            depth=1, method=f"cuMemcpyHtoDAsync to {pcie['device']}, pinned; "
+                            f"the warm column is the pageable rate",
+            sample_bytes=pcie["sample_bytes"])
     profile.measured_at = time.time()
     return profile
 

@@ -82,8 +82,26 @@ class Storage:
 
     @property
     def source(self) -> float | None:
-        """The rate a first read of a large file will actually see."""
-        return self.cold if self.cold is not None else self.warm
+        """The rate a first read of a large file will actually see.
+
+        The cold rate or nothing. It used to fall back to `warm`, which is a
+        page-cache rate -- 33-40 GB/s on the box in MEASURED.md against a disk
+        that does 2.4 -- so on any platform that cannot produce a cold number
+        the gate came out roughly thirty times too small and the router
+        recommended the plain file everywhere, including the machines where
+        the coded route wins. A missing measurement has to look missing;
+        `warm_bound` is how a caller says what is known instead.
+        """
+        return self.cold
+
+    @property
+    def warm_bound(self) -> float | None:
+        """The warm rate, when it is the only thing measured.
+
+        Not a link rate. It is an upper bound on one, and useful only to say
+        that the coded route is unevaluated rather than beaten.
+        """
+        return None if self.cold is not None else self.warm
 
 
 @dataclass(frozen=True)
@@ -179,15 +197,14 @@ def host_info() -> dict:
         "cpus": os.cpu_count() or 0,
         "page_size": _page_size(),
     }
-    try:
-        from ._lmz import lmz as _find
+    from .lmzcodec import backend_info
 
-        m = _find()
-        info["lmz"] = m.__version__
-        info["lmz_backends"] = m.backends()
-    except Exception as exc:              # noqa: BLE001 -- lmz is optional here
-        info["lmz"] = None
-        info["lmz_error"] = str(exc)
+    codec = backend_info()
+    info["lmz"] = codec.get("version")
+    if codec.get("backends"):
+        info["lmz_backends"] = codec["backends"]
+    if codec.get("error"):
+        info["lmz_error"] = codec["error"]
     return info
 
 
