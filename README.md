@@ -13,16 +13,25 @@ link it is feeding from — and the two sides of that vary very differently. A
 decoder varies maybe 3× across CPUs. **The link varies by a factor of a
 hundred.**
 
-| link | GB/s | verdict |
-|---|---|---|
-| NVMe, warm in the host cache | 6.2 | break-even |
-| NVMe, first touch | 2.4 | **pays** |
-| UFS 4.0 (phone flash) | 4.0 | **pays** |
-| **9p / network mount** | **0.26** | **pays** |
-| **SATA SSD** | 0.55 | **pays, ratio-capped** |
-| **eMMC / SD / USB** | 0.30 | **pays, ratio-capped** |
-| **1 Gb/s network** | 0.125 | **pays, ratio-capped** |
-| **a download** | 0.01 – 0.1 | **pays, and see below** |
+| link | GB/s | verdict | |
+|---|---|---|---|
+| NVMe, warm in the host cache | 6.2 | 0.74× — a modest tax | **measured** |
+| **9p / network mount** | **0.26** | **1.45× — pays** | **measured** |
+| NVMe, first touch | 2.4 | pays | *projected* |
+| UFS 4.0 (phone flash) | 4.0 | pays | *projected* |
+| SATA SSD | 0.55 | pays, ratio-capped | *projected* |
+| eMMC / SD / USB | 0.30 | pays, ratio-capped | *projected* |
+| 1 Gb/s network | 0.125 | pays, ratio-capped | *projected* |
+| a download | 0.01 – 0.1 | pays, see below | *projected* |
+
+**Two rows are measured end to end; the rest are the gate's arithmetic and are
+marked as projections.** They are not measurements and should not be read as
+any. The projection is `min(1/f, decode/link)` with decode = 5.95 GB/s measured
+through this package's own transport, which puts the crossover at **5.95 GB/s of
+link** — every projected row sits below it. The one measured row above the
+crossover behaves as predicted in direction and is worse than predicted in
+degree: 0.74× where the arithmetic says 0.95×, so about 20% is unaccounted and
+is being chased.
 
 So the value is very nearly a function of one variable: **how slow the link
 is.** Measured at 16 threads with lmz's field-split codec, the crossover sits
@@ -131,14 +140,16 @@ decoder running at D and an archive at ratio f, storage slower than D pays and
 storage faster than D is taxed — and below D·f the win saturates at 1/f,
 because the ratio is all there is left to win.
 
-Taking this box's **measured** CPU decode of 1.05 GB/s and f = 0.671, the
-crossover sits at about **1 GB/s of storage**, saturating at 0.70:
+Taking this box's measured decode of **5.95 GB/s** through the transport, with
+lmz's field-split codec at 1 MiB chunks and f = 0.673, the crossover sits at
+about **6 GB/s of storage** — not the ~1 GB/s an earlier version of this page
+gave, which used the conditioned codec's rate. All projections:
 
-| storage | GB/s | verdict with a 1.05 GB/s CPU decoder |
+| storage | GB/s | projected verdict |
 |---|---|---|
-| NVMe Gen5 | 12.0 | tax, 0.09× |
-| NVMe Gen4 (this box) | 6.34 | tax, 0.17× |
-| UFS 4.0 (phone) | 4.0 | tax, 0.26× |
+| NVMe Gen5 | 12.0 | tax, 0.50× |
+| NVMe Gen4 | 6.34 | break-even, 0.94× |
+| UFS 4.0 (phone) | 4.0 | **pays, 1.49× — saturated** |
 | **SATA SSD** | **0.55** | **pays, 1.49× — saturated** |
 | **eMMC / SD / USB** | **0.30** | **pays, 1.49× — saturated** |
 
