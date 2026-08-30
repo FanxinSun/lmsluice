@@ -1,119 +1,143 @@
-# load — the model load path, on whatever silicon the box has
+# lmsluice — the model load path, on whatever silicon the box has
 
-A runtime that gets model weights off storage and into memory as fast as the
-machine allows, by decoding lmz archives on the fastest processor present —
-a discrete GPU, the integrated one, or the CPU — and choosing between them by
-measurement rather than by assumption. Pure software, and nothing about the
-bytes changes: every weight arrives byte-identical.
+A runtime that moves model weights from wherever they are to wherever they are
+needed, over the route that is actually faster on the machine it is running
+on. It decides by measurement, not by assumption, and it says what it decided
+and on what numbers. Pure software, pure standard library, and nothing about
+the bytes changes: every weight arrives byte-identical.
 
-The target is **loading**, not training and not inference. `vram/` owns
+The target is **transport**, not training and not inference. `vram/` owns
 training residency and has ruled out inference on its own roofline. This is
-the third case and the only one that happens on every machine, every time a
+the third case, and the only one that happens on every machine, every time a
 model is opened.
+
+```
+lmsluice probe  ./model.lmz          # measure this machine, once
+lmsluice plan   ./model.lmz          # which route is faster here, and why
+lmsluice bench  ./model.lmz --against ./model.safetensors   # check that answer
+lmsluice get    https://host/m.lmz ./model.safetensors      # move it
+```
+
+```python
+import lmsluice
+
+m = lmsluice.open_model("model.lmz")   # or .safetensors, or an https URL
+print(m.plan.explain())                # the route, the rates, the arithmetic
+weights = m.load()                     # one buffer, filled in parallel
+
+for name, view in m.stream(budget=1 << 30):   # bounded memory, overlapped I/O
+    upload(name, view)
+```
 
 ## The one ratio
 
-Compression is free on a path when the decoder is faster than the tier it is
-feeding from. Everything here follows from that:
+Compression is free on a path when the decoder is faster than the link it is
+feeding from. Everything here follows from that. For N plain bytes and an
+archive whose coded size is r times its plain size, with the stages overlapped:
 
-    decode_rate  >  source_rate      →  the archive loads faster than the file
+    plain    N / link
+    coded    max(rN / link, N / decode)
+    speedup  min(1/r, decode / link)
 
-lmz already wins that comparison decisively on one path and loses it on
-another, and the second case is why this project exists:
+The gate is the second term and **it does not mention r at all**. Compression
+pays exactly when the codec beats the link; the ratio then decides how much,
+up to a ceiling of 1/r. Writing is the same statement with `encode` in place
+of `decode`, which is why the answer is often the opposite on the way out.
 
-| path | source | decoder | verdict |
-|---|---|---|---|
-| NVMe → VRAM, CUDA decoder | 28.8 GB/s PCIe | **418 GB/s** | free by 14×; **1.46× faster** than plain safetensors |
-| NVMe → RAM, CPU decoder | 6.34 GB/s NVMe | **2.0 GB/s** | **2.85× slower** than plain safetensors |
+Three consequences, each of which is easy to get wrong:
 
-The second row is the whole problem — **against this box's disk**. On a
-machine without an NVIDIA GPU and with a Gen4 NVMe under it, installing lmz
-today costs about **2.85× on load time** in exchange for 34.7% less disk, and
-that is a bad trade taken by default on most of the machines lmz runs on. It
-will not be fixed by threads: lmz's own README records that past four threads
-the CPU decoder *"runs into the memory bus at about 2 GiB/s."*
+- **A fast disk is a reason not to compress.** Above the gate the coded route
+  loses, and by more the faster the disk is. A loader that always takes the
+  compressed path is choosing to be slower on the machines that would
+  otherwise be fastest.
+- **The ratio cannot rescue a slow codec.** `min` is a floor, not a sum.
+  Saving 40% of the bytes buys nothing where the decoder is already the
+  bottleneck.
+- **Expanding first is a third route, and it is far worse than both.** Without
+  a tool like this, a user with a compressed checkpoint runs `decompress` and
+  then opens the result — paying the link twice and a write in between. It is
+  priced here so the comparison people actually face is visible.
 
-It is not fixed by a slower disk either, but it *inverts* on one: the same
-2.0 GB/s decoder is a 1.53× win on a machine with a SATA SSD. Which disk the
-archive is being read from is half the gate, and the next section makes it an
-axis rather than a constant.
+## Where the verdict flips
 
-## The gate
+The gate is a curve, and both sides of it are machines people own. With a
+decoder running at D and an archive at ratio f, storage slower than D pays and
+storage faster than D is taxed — and below D·f the win saturates at 1/f,
+because the ratio is all there is left to win.
 
-Whether a given device can pay is decided by two numbers, and the first
-version of this file had only one of them. An entropy decoder spends compute
-to avoid reading bytes, so it is bounded from both sides — and the thing it
-has to beat is not a constant, it is *the disk in the machine beside it*.
+Taking this box's **measured** CPU decode of 1.05 GB/s and f = 0.671, the
+crossover sits at about **1 GB/s of storage**, saturating at 0.70:
 
-    decode  =  min( C / k , BW / (1 + f) )        the decoder
+| storage | GB/s | verdict with a 1.05 GB/s CPU decoder |
+|---|---|---|
+| NVMe Gen5 | 12.0 | tax, 0.09× |
+| NVMe Gen4 (this box) | 6.34 | tax, 0.17× |
+| UFS 4.0 (phone) | 4.0 | tax, 0.26× |
+| **SATA SSD** | **0.55** | **pays, 1.49× — saturated** |
+| **eMMC / SD / USB** | **0.30** | **pays, 1.49× — saturated** |
 
-    speedup =  min( 1/f , decode / disk )         what that is worth
+So the same code and the same archive reach opposite verdicts, decided
+entirely by the machine in front of them. A laptop with a SATA SSD gets the
+whole of lmz's ratio as load speed with nothing but the CPU; the desktop this
+was written on pays six times over for it. Neither is *the* answer, which is
+the reason the decision is made at run time and not written down here.
 
-`C` is the device's compute, `BW` its streaming bandwidth, `f` the coded
-fraction (0.653 on model weights), and `k` the decoder's compute cost per
-decoded byte. `gate.py` evaluates it; `python3 gate.py` prints the tables
-below for any device you add to it.
+Move the decoder instead of the disk and it flips again:
 
-**`k` is not measured, and that is the honest state of this project.** One
-number exists — lmz's CUDA decoder at 418 GB/s on an RTX 5080 — and it fits
-both readings at once: it is 84% of that card's bandwidth bound (497), and it
-is exactly `C / k` for `k = 128`. On the card that produced it the two
-readings differ by 16%. On a 2-CU display adapter they differ by **8×**, and
-that is the device this project's case rests on. Scaling that one point by
-FP32 throughput — what this table did before — silently picks the compute
-reading, which is to say it assumes what was never measured.
+| decoder | GB/s | against 6.34 GB/s NVMe |
+|---|---|---|
+| lmz CPU, this box, measured | 1.05 | 0.17× |
+| lmz CUDA, per-chunk table, RTX 5080 | 111 | free; 1.49× by the ratio |
+| lmz CUDA, shared table, RTX 5080 | 418 | free; 1.49× by the ratio |
+| a 2-CU display iGPU, **predicted** | 4 – 36 | pays at the floor of the interval |
 
-So every device gets an interval: the compute reading as its floor, the
-bandwidth bound as its ceiling.
+That last row is `../gate.py`'s job rather than this package's, and the
+interval is the honest state of it: the decoder's compute cost per byte is
+known from **one** point on **one** card, and that point fits a
+compute-bound and a bandwidth-bound reading equally well. The two readings
+agree on the RTX 5080 that produced them and differ by 8× on a 2-CU
+integrated GPU — which is the class this project exists for. `gate.py` carries
+both and refuses to pick; this package measures instead of predicting, and the
+two are asserted to state the same identity in the test suite.
 
-| device | FLOP/byte | compute floor | b/width ceiling | decode GB/s | source |
-|---|---|---|---|---|---|
-| RTX 5080 (dGPU) | 65 | 418 | 497 | **418–497** | measured, `MEASURED.md` |
-| M4 Max (unified) | 31 | 112 | 278 | 112–278 | spec arithmetic |
-| Strix Halo (unified) | 69 | 116 | 130 | 116–130 | spec + 215 GB/s measured, blueprint §1 |
-| Radeon 780M (iGPU) | 72 | 33 | 36 | 33–36 | spec arithmetic |
-| Phone SoC GPU (class) | 44 | 19 | 34 | 19–34 | spec class figure |
-| Radeon 2-CU (iGPU) | 10 | 4.4 | 36 | **4.4–36** | measured, `MEASURED.md` |
+**What survives the pessimistic reading** is the founding claim: even at the
+floor of the interval, the smallest integrated GPU AMD ships decodes about 2×
+faster than the CPU decoder, on a device that is a display adapter rather than
+an APU. What does not survive is reading any one desktop's NVMe as *the* disk.
 
-**No shipping device in that table is bandwidth-bound at `k = 128`** — every
-one sits below the 78 FLOP/byte crossover. If the decoder really costs what
-the compute reading says, then decode is a compute problem *everywhere*, and
-FLOP-per-byte is not the discriminator this file used to claim it was:
-absolute compute is. That inversion follows from one unmeasured constant,
-which is the argument for measuring it.
+## What it is
 
-Then the second axis, the one entirely absent before — the machine's own
-storage:
+**A router.** `lmsluice plan` reads the machine's measured profile and prices
+every route. `--link` and `--decode` answer the question a laptop cannot
+measure — *would this pay over the link I will deploy on?* — with the asker's
+numbers, labelled as theirs.
 
-| device | NVMe Gen5 12.0 | NVMe Gen4 6.34 | UFS 4.0 | SATA SSD 0.55 | eMMC/SD 0.30 |
-|---|---|---|---|---|---|
-| RTX 5080 | pays | pays | pays | pays | pays |
-| M4 Max | pays | pays | pays | pays | pays |
-| Strix Halo | pays | pays | pays | pays | pays |
-| Radeon 780M | pays | pays | pays | pays | pays |
-| Phone SoC GPU | pays | pays | pays | pays | pays |
-| Radeon 2-CU | measure 0.37× | measure 0.70× | pays 1.10× | pays | pays |
+**A transport.** Two stages, sized independently, overlapped across a bounded
+queue. Fetching wants queue depth; decoding wants the opposite, because lmz's
+own measurement is that past two threads the interpreter between native calls
+turns into contention. `lmz.decompress` reads and decodes inside one worker,
+so one setting has to serve both. Splitting them is what this adds, and
+`Report.limited_by` names which stage the run waited on.
 
-Bare "pays" is the saturated case: the decoder beats the disk by more than
-`1/f`, so the archive's ratio *is* the load speed and nothing faster helps.
-"measure" means the interval straddles that disk — undetermined until `k` is
-pinned, which is not a negative result. **The bottom row changes verdict
-three times across one table row**, and nothing about the device changed. A
-gate calibrated against one machine's NVMe is not a gate.
+**Three shapes of access**, because consumers differ. `map()` is an mmap and
+moves nothing until touched — the fastest partial access there is, and it has
+no coded form, which the tool says rather than faking. `load()` reads for real
+into one buffer. `stream()` does the same under a memory ceiling, yielding
+tensors as they land, for the machines where the model does not fit twice.
 
-**The founding claim survives the worst reading.** Even if the pessimistic
-`k` is right, the smallest integrated GPU AMD ships decodes at 4.4 GB/s
-against the CPU decoder's 2.0 — **2.2×, on a 2-CU display adapter**. That is
-still the case for this project in one line. What does not survive is reading
-that row's verdict against one desktop's NVMe as *the* verdict.
+**Any source.** A local file and an HTTPS URL are two implementations of
+`pread`, so the pipeline above them is unchanged, and an lmz archive can be
+opened and decoded over range requests without landing on disk first. Servers
+that refuse ranges are fetched once instead of refused. Connections are kept
+alive per thread, because a handshake per megabyte costs more than the
+megabyte.
 
-**FP32 FMA is a proxy and the wrong unit.** rANS decoding is integer work
-with dependent shared-memory loads, so `C` is measured in FP32-FLOP
-equivalents only because that is what `probe/igpu-bench.ps1` can measure on
-any device with nothing installed. Every rate derived from it is a reason to
-go and measure, never a result — which is what `probe/` is for, and pinning
-`k` on one low-FLOP/byte device is the highest-value measurement this
-repository can make.
+**A probe that measures the right things.** Cold rather than warm, per storage
+device rather than per machine, and against the archive that will actually be
+read rather than a synthetic one — decode rate moves with chunk size and with
+which codecs the encoder chose, so it is a property of the file, not the
+build. Where the platform cannot drop a cache, the number is reported as warm
+rather than passed off as cold.
 
 ## What this is not
 
@@ -125,6 +149,12 @@ integrated GPU should decode the archive, not run the network.
 **A second codec.** lmz produces bytes and turns them back into bytes; it does
 not decide when. That line does not move because the device changed.
 
+**A benchmark that flatters itself.** `lmsluice bench` runs both routes for real
+and prints the predicted speedup beside the measured one. Twice so far the
+plan has been checked this way, on a local disk and over HTTP, and it was
+right to the second digit both times — see `MEASURED.md`. When it is wrong,
+one command says so.
+
 ## Where the boundary is
 
 | | whose |
@@ -132,45 +162,65 @@ not decide when. That line does not move because the device changed.
 | the coded stream, its tables, its blocks, its index | **lmz** |
 | a standalone GPU decoder with a stable ABI — CUDA, Metal, Vulkan | **lmz** |
 | tensor → block addressing | **lmz** |
-| which device decodes on this machine, and the probe that decides | **load** |
-| dispatch, queue depth, staging buffers, overlap with I/O | **load** |
-| adapters — safetensors-compatible open, PyTorch, llama.cpp | **load** |
+| which device and which route on this machine, and the probe that decides | **lmsluice** |
+| dispatch, queue depth, staging buffers, overlap with I/O | **lmsluice** |
+| sources — local, HTTP, and whatever comes next | **lmsluice** |
+| adapters — safetensors-compatible open, PyTorch, llama.cpp | **lmsluice** |
 | training residency across VRAM / RAM / SSD | `vram/` |
 
-The split against lmz is the one lmz's own `docs/gpu-residency-handover.md`
-already draws, applied to a different consumer: lmz ships decoders, this
-decides which one runs and when. The kernels stay in `lmz/gpu/` precisely so
-there is one ABI and not two.
+The split against lmz is the one `lmz/docs/gpu-residency-handover.md` already
+draws, applied to a different consumer. Every use of lmz's internals is in
+`lmsluice/archive.py` and nowhere else; two of them are internals rather than
+public API — decoding one chunk, and a v7 archive's shared table set — because
+lmz exposes decompressing a *file* and reading a *byte range*, and neither is
+the shape a pipeline wants. Both are probed at open time and fall back to
+`lmz.MappedArchive`, which is public and stable, so a change in lmz makes this
+slower and not broken. `Archive.route` says which one is live, so a benchmark
+can never quietly measure the fallback.
+
+**The one thing lmz should promote:** a public "decode this chunk into this
+buffer" entry point. It is the whole of the coupling.
 
 ## Status
 
-Nothing here runs yet. What exists:
+Runs. 33 tests, no dependencies beyond the standard library and lmz.
 
-- `gate.py` — the gate above as ~150 lines of dependency-free Python:
-  devices and storage tiers as parameters, the interval, the verdict matrix.
-  `python3 gate.py`. Add a machine to it rather than re-deriving the
-  arithmetic in prose.
-- `probe/igpu-bench.ps1` — a self-contained Direct3D 11 compute benchmark
-  (PowerShell plus inline C#, no toolkit, no installs) that enumerates every
-  DXGI adapter and measures streaming read bandwidth, FP32 FMA throughput and
-  a multithreaded CPU baseline. It is the source of the table above and it is
-  the gate: run it on a machine and it says whether decoding there can pay.
-- `MEASURED.md` — this box's numbers and the conditions behind them.
+```
+python3 tests/test_lmsluice.py       # builds its own fixtures; skips what needs lmz
+./lmsluice-cli doctor                # what is measured and what is active
+```
 
-**What is not blocked on anything**: pinning `k` on one low-FLOP/byte device
-— a decode measurement, not an FMA proxy — which turns six intervals above
-into six numbers and settles whether the 2-CU row pays against a fast disk.
+What exists:
 
-What is blocked on lmz, in order:
+- `lmsluice/transport.py` — the two-stage overlapped pipeline, bounded by a queue
+- `lmsluice/plan.py` — the routing arithmetic, and the margin that stops a
+  decision being made on noise
+- `lmsluice/probe.py` — cold reads, sustained writes, and decode measured on the
+  real archive with the thread count swept rather than assumed
+- `lmsluice/source.py` — local files and HTTP range requests behind one `pread`
+- `lmsluice/archive.py` — the lmz coupling, in one file
+- `lmsluice/model.py` — `map` / `load` / `stream`, one API over either route
+- `lmsluice/cli.py` — `probe`, `plan`, `info`, `bench`, `get`, `write`, `doctor`
+- `../gate.py` — the device-side model: decode rate bounded from two sides,
+  the unmeasured constant carried as an interval, no imports so it runs on a
+  machine that has nothing installed
+- `probe/igpu-bench.ps1` — the Direct3D 11 compute benchmark that feeds it,
+  measuring whether a given device *could* decode
+
+[`docs/transport-handover.md`](docs/transport-handover.md) is the full record
+of how this was built and measured — the design decisions that were not
+obvious, the two corrections that changed it after it was written, the traps,
+and what each open item is blocked on.
+
+What is blocked on lmz, in order, unchanged from
+`lmz/docs/portable-decoder-handover.md`:
 
 1. **The CUDA kernel reading v7.** `--shared-tables` writes a format worth
    3.8× on the GPU decoder and nothing collects it yet.
-   `lmz_gpu_decode_batch_dev` already takes a shared header in `hdr`, so this
-   is wiring.
-2. **The Metal port**, written but never run —
-   `lmz/scratchpad/gpu/metal/`.
-3. **Vulkan**, which is what actually opens this project up: AMD and Intel
-   iGPUs, Windows and Linux, driver-level with no toolkit to find.
+2. **The Metal port**, written but never run — `lmz/scratchpad/gpu/metal/`.
+3. **Vulkan**, which is what opens this up: AMD and Intel iGPUs, Windows and
+   Linux, driver-level with no toolkit to find.
 
-The reasoning and the measurements behind that order are in
-`lmz/docs/portable-decoder-handover.md`.
+When any of those lands, it enters here as another codec rate in the profile
+and another row in the plan. Nothing above `plan.py` changes, which is the
+point of putting the decision in one place.
