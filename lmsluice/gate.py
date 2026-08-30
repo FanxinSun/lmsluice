@@ -106,11 +106,17 @@ FALLBACK_PROVENANCE = (
     "lmz.gpu.cost_model('shared') as of lmz 1.3.0: k measured by a grid sweep "
     "at fixed byte traffic, 1 to 1191 blocks over identical input, linear in "
     "resident blocks to within 3% below 84 blocks and bending as bandwidth "
-    "takes over, on one RTX 5080. NOT a single-point fit. The earlier 230-330 "
-    "was fitted where bandwidth was binding, which is the regime that cannot "
-    "separate the two readings; this one is taken from the rows below "
-    "saturation, which is the regime a small device actually runs in. One "
-    "device still: no low-FLOP-per-byte part has been measured.")
+    "takes over, on one RTX 5080. NOT a single-point fit, and lmz's own words "
+    "for the derivation are 'over the rows below saturation' -- the "
+    "compute-bound regime, which is the one a small device runs in. THE REST "
+    "OF THIS SENTENCE IS OUR READING AND NOT LMZ'S: the earlier 230-330 came "
+    "from an occupancy sweep at 64-384 threads a block, and on this card that "
+    "sweep sits in the bandwidth-bound region -- 418 GB/s measured against a "
+    "compute ceiling above 1200 -- so a k divided out of it is bounded by the "
+    "memory system rather than by the kernel, which is consistent with the "
+    "corrected value being lower. lmz does not characterise its own earlier "
+    "number this way. One device either way: no low-FLOP-per-byte part has "
+    "been measured.")
 
 # The occupancy the k interval was measured under: lmz publishes it as a range,
 # 3 to 4 blocks resident per SM. This is not a footnote, it is what the interval

@@ -201,9 +201,15 @@ measuring `k` across a grid sweep rather than at a single launch: a sweep across
 residency is precisely what tells a latency-bound cost from a bandwidth ceiling,
 because the two predict different slopes as blocks are added. `k` also moved,
 230–330 → 217–248 lane-cycles per decoded byte, and the direction matters more
-than the size — the old interval was fitted where **bandwidth was binding**,
-which is the regime that cannot tell the two apart. The new one comes from the
-rows below saturation, which is the regime a small device actually runs in.
+than the size. lmz's own words for the new derivation are *"over the rows below
+saturation"* — the compute-bound regime, the one a small device runs in.
+
+*Our reading, not lmz's:* the earlier interval came from an occupancy sweep at
+64–384 threads a block, and on that card such a sweep sits in the
+bandwidth-bound region — 418 GB/s measured against a compute ceiling above 1200
+— so a `k` divided out of it is bounded by the memory system rather than by the
+kernel. That is consistent with the corrected value being lower, but lmz does
+not characterise its own earlier number that way and we have not asked it to.
 
 So the gate picks now, on the codec's published grounds rather than on our
 inference:
