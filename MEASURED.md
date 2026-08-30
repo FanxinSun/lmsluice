@@ -255,3 +255,630 @@ times slower and lands on the other side of the gate.
 The probe writes its profile to the platform cache directory and refuses to
 use one whose fingerprint says it came from a different machine, so a home
 directory that travels does not carry the wrong numbers with it.
+
+## The RAM → VRAM path, measured — 2026-08-30
+
+*Added when the device path was built. Same box, same fixture. The CUDA rows
+in earlier sections were lmz's numbers quoted in this tool's arithmetic; these
+are this tool driving the hardware.*
+
+### The link
+
+`cuMemcpyHtoDAsync` to an RTX 5080 (sm_120, 17.1 GB), driver 610.88, through
+the CUDA **driver** API via ctypes — no toolkit, no runtime library, no torch.
+Median of three, 128 MiB per copy:
+
+| | GB/s | |
+|---|---|---|
+| pinned (`cuMemHostAlloc`) | **28.45** | 98.8% of Gen4 x16's 28.8 theoretical |
+| pageable | 17.84 | the driver stages it through its own pinned buffer |
+
+Pinned is **1.59×** pageable here, and it is also the only form that can
+overlap, so the staging buffers are pinned and the profile carries both numbers
+rather than one called "PCIe".
+
+### The path, cold, best of three
+
+1.87 GB BF16 checkpoint, cache dropped before each run, 128 MiB double-buffered
+staging windows cut on block boundaries:
+
+| route | predicted | measured | |
+|---|---|---|---|
+| plain → VRAM | 3.01 GB/s | **3.35 GB/s** | read-limited |
+| host-decode → VRAM | 1.05 GB/s | **0.81 GB/s** | decode-limited, 23% short |
+| device-decode → VRAM | — | **not built** | see below |
+
+Every route verified **SHA-256 identical** to the source checkpoint after
+copying back out of VRAM.
+
+### The first place the plan is materially wrong, and why
+
+The ratio of coded to plain into VRAM was predicted at 0.35× and measured at
+0.24× — **30% off**, where the two host-RAM predictions were right to the
+second digit. The error is entirely in the host-decode route, which came in
+23% below its predicted rate, and the cause is a limit of the model rather than
+a bug in it:
+
+**`max()` assumes overlapped stages are free, and they are not when they share
+a resource.** On the storage path the stages use different hardware — the disk
+fetches while the CPU decodes — so overlapping them costs nothing and the model
+holds. On this path the CPU decodes into one pinned buffer while the copy
+engine DMAs out of the other, and **both are on the memory bus**. lmz's decoder
+is already memory-bus-bound at about 2 GB/s by its own README, so bandwidth
+taken by the DMA comes straight out of the decode.
+
+The general form, which is what transfers to another machine: the pipeline
+reaches `max(stages)` when the stages bind on different resources and degrades
+toward `sum(stages)` as they bind on the same one. Two stages that both saturate
+memory bandwidth do not overlap, whatever the queue between them says. A
+unified-memory machine has this everywhere — there is one bus and every stage is
+on it — so the discrepancy measured here is the *mild* version of what an
+Apple or Strix Halo part would show.
+
+This has not been corrected in `plan.py`, deliberately: the fix is a contention
+term, and one measurement on one machine is not enough to fit one. It is
+recorded here, and `bench --to-device` reproduces it in one command.
+
+### What is not built
+
+**device-decode** — copy the *coded* bytes to VRAM and decode them there — is
+priced by `vram_plan` and reports `unknown`, because the rate is unmeasured and
+the path is unbuilt. It is the route worth having: it is the only one that
+shortens **both** links, and against a 111 GB/s device decoder it should be
+ratio-capped at 1.49× rather than losing.
+
+What blocks it is not CUDA. `lmz.gpu` is available on this box
+(`cuda:NVIDIA GeForce RTX 5080 sm_120 84 SMs`, already built, nothing written
+into lmz), and its ABI has the right entry point —
+`lmz_gpu_decode_batch_dev(hdr, streams, offsets, nstr, plane, out, stream, tpb)`
+takes device pointers and does not synchronise. What is missing is the layer
+that can tell it *which* streams: feeding it requires decomposing a chunk into
+its per-plane rANS streams, and lmz exposes decoding a file and reading a byte
+range, neither of which is that. lmz's own `gpu-residency-handover.md` names
+this gap in the same terms — *"nothing can yet ask an archive where a tensor's
+blocks are"* — so it is lmz's to close, and it is one piece of work rather than
+research.
+
+The Python entry point that does exist, `lmz.gpu.decode_batch`, is host-to-host
+and PCIe-bound by construction. Routing through it would send the coded bytes
+up and the plain bytes back down, which is slower than every route above.
+
+### Conditions
+
+- Pinned staging is two 128 MiB buffers. Page-locking is a kernel operation and
+  a large one can fail; the size is a parameter (`to_device(window=)`) and the
+  default is a compromise, not a measurement.
+- The primary context is *retained*, not created, so a buffer handed to torch
+  through `__cuda_array_interface__` is adopted with no copy. A second context
+  would have made every handoff a copy and hidden it.
+- The driver is loaded in a child process first. A half-removed driver leaves
+  `libcuda.so.1` on disk with a faulting initialiser that kills the process on
+  `CDLL`, with no exception to catch.
+- **No second GPU, no second architecture, no non-NVIDIA device.** Everything
+  above is one RTX 5080. The AMD and Intel paths need Vulkan, which does not
+  exist in lmz yet, and Apple needs Metal, which is written and never run.
+
+## Windows, actually run — 2026-08-30
+
+*Every earlier section of this file is Linux under WSL2. This one is the
+Windows side of the same machine, reached by invoking `python.exe` from WSL.
+It exists because "the code is standard library, so it should run on Windows"
+turned out to be false, and the only way to find that out was to run it.*
+
+Python 3.12.11, NTFS, **512-byte sectors** (queried, not assumed), 128 MB
+sample, the same `lmsluice` read path as Linux.
+
+| | GB/s | |
+|---|---|---|
+| cold, `FILE_FLAG_NO_BUFFERING` | **3.51** | what the router now uses |
+| warm, buffered through the fallback read path | 3.17 | |
+
+Cold reads **are** available on Windows after all. `CreateFileW` with
+`FILE_FLAG_NO_BUFFERING` opens a handle that never touches the cache, which is
+the other half of the idea `posix_fadvise` provides on Linux, and it is
+reachable from `ctypes` with nothing installed. Verified to return the file's
+real bytes at offset 0 and at 64 MiB, and to hold its rate across repeats
+rather than climbing the way a cached read does.
+
+### Three bugs that only running it could find
+
+**`os.pread` does not exist on Windows.** Not the cold path -- *every* read in
+the package, which failed with `AttributeError` before reaching any of the
+interesting logic. The fix cannot be a lock around seek-then-read, because that
+would serialise the fetch stage and silently turn its queue depth into one;
+each thread gets its own descriptor and therefore its own file position, which
+is the independence `pread` gives, bought with a handle per thread.
+
+**The first version of that fix had a race.** It claimed the constructor's
+descriptor by testing a list outside the lock, so several threads starting
+together all took the same one -- reintroducing the shared file position, only
+under concurrency. Caught on Linux by a test that forces the no-`pread` path,
+which is now part of the suite: the fallback would otherwise only ever run on
+the platform nobody tests on, which is how it came to be missing in the first
+place.
+
+**`INVALID_HANDLE_VALUE` is -1, and the handle arrives unsigned.** Declaring
+`CreateFileW.restype = HANDLE` returns `0xFFFFFFFFFFFFFFFF` on failure, so
+`== -1` never matched and a missing file produced a reader whose every read
+failed confusingly instead of the clean `None` the caller checks for.
+
+### The condition that limits this measurement
+
+Cold (3.51) came out *above* warm (3.17), which on Linux would mean something
+was wrong. Here it does not: the warm number goes through the Python read path
+and the unbuffered one is measured with a copy out of an aligned buffer, and on
+this volume **both land near the Python read ceiling of about 3.5 GB/s**. So
+what this sample shows is that at 128 MB the disk is not the binding
+constraint on Windows -- the interpreter is. A larger sample on a slower volume
+would separate them; that has not been run.
+
+`read_at` copies by default for exactly this reason. Discarding the bytes into
+a reused aligned buffer measured **5.69 GB/s against a 3.16 GB/s warm read on
+the same file** -- reporting the cache as slower than the disk -- because it
+skipped the allocation every other rate in the profile pays. A rate that is not
+measured the way the pipeline will actually be fed is not comparable to the
+decode rate it will be divided by.
+
+### Still not run anywhere
+
+macOS. The `fcntl(F_NOCACHE)` path remains written and unexecuted, and the
+Apple decoder is lmz's unrun Metal port. Nothing here has touched Apple
+silicon.
+
+## device-decode, built and measured — 2026-08-30
+
+*Coded bytes cross PCIe and become plaintext in VRAM. Built after the host
+routes; `lmsluice/devdecode.py` and `lmsluice/merge.cu`. Every number below is
+this box, best of three, cache dropped before each run, verified SHA-256
+identical to the source after copying back out of VRAM.*
+
+| model | plain → VRAM | host-decode → VRAM | device-decode → VRAM |
+|---|---|---|---|
+| whisper_tiny, fp32, 151 MB, f=0.427 | 0.61 | 0.46 | **0.99–1.65** |
+| Llama 1.1B, BF16, 1.87 GB, f=0.671 | 2.78 | 0.64 | **refused, see below** |
+
+On the fp32 case device-decode is the fastest route — roughly **2× plain** —
+and only **0.427 of the plain bytes cross PCIe**. That is the shape the
+arithmetic predicted: the only route that shortens both links.
+
+### It wins on the link, not on the decoder, and that is not what was expected
+
+The device kernels measured **1.87–2.37 GB/s of plain bytes**, against the
+111 GB/s lmz reports for the same kernel. The gap is this package's dispatch,
+not lmz's decoder, and it was worth chasing because the answer is structural:
+
+**An lmz stream is 8 lanes wide whatever its size.** 8 interleaved rANS states
+means one stream occupies a quarter of a warp, so what fills a GPU is stream
+*count*. An 8 MiB-block archive of a 151 MB model yields 19 chunks × 4 planes =
+**72 streams ≈ 576 lanes on an 84-SM card**, which is close to idle. lmz's
+111 GB/s came from a far larger batch and says so.
+
+**More chunks does not fix it, because dispatch takes over.** The same model in
+64 KiB blocks gives 2305 chunks and 9220 streams — and ran *slower*, at 0.60
+GB/s. Batching every chunk's merge into one launch instead of one launch each
+moved that only to 0.71, which rules the merge out: what remains is the
+host-side cost of 2305 separate `pread`s and assembling 9220 payload slices in
+Python before anything reaches the device.
+
+So the route as built is bounded at about 2 GB/s by dispatch on one side and
+stream count on the other, and it still wins — because at f=0.427 it is moving
+less than half the bytes. **The 111 GB/s figure is not reachable through this
+implementation**, and quoting it as though it were would be exactly the kind of
+carried number this file exists to stop.
+
+What would fix it, in order: assemble the stream blob without per-chunk Python
+slicing; issue the reads through the existing transport rather than one at a
+time; and pick a block size in the middle of the two extremes measured here,
+since neither end is good. None of that is research.
+
+### The flagship case cannot use it at all
+
+A BF16 checkpoint is refused, all 224 chunks, and falls back to the host route
+with the reason recorded. This is not missing plumbing:
+
+**lmz's best codec for BF16 weights is one its own GPU kernel cannot read.**
+`CODEC_BF16C` codes sign and mantissa per exponent bucket, so its sub-streams
+are not independent rANS and the batch decoder has nothing to take. Measured on
+real archives: an fp32 checkpoint comes out **19/19 `CODEC_SPLIT`**, a BF16 one
+**224/224 `CODEC_BF16C`**. lmz picks the conditioned form whenever it wins on
+size, which on real weights is always.
+
+So the GPU decode path today serves fp32 and fp16 checkpoints and not the LLM
+BF16 case this project is mostly about. Closing that is lmz's: either a kernel
+that reads the conditioned form, or a way to ask for `CODEC_BF16` when the
+archive is destined for a GPU. It is one decision and one kernel, not research.
+
+### The merge kernel, and why it is here
+
+`merge.cu` transposes plane-major output back into elements at **264 GB/s**.
+It is on lmz's side of the boundary and is on loan; the alternative was the
+CUDA driver's own strided copy, measured at **1.87 GB/s**, which would have made
+the device route slower than the host one it exists to beat.
+
+Two bugs in it were found by testing rather than by reading. The vectorised
+stores assume the destination is aligned to the element width, and a chunk's
+destination is a byte offset into a safetensors file — aligned or not depending
+on how long the JSON header happens to be. Misaligned, the vector store faulted
+the whole CUDA context; the byte-wise kernel now takes those. And the upload
+accounting initially omitted stored planes, which flattered the one number the
+route is sold on.
+
+### Conditions
+
+- PTX, not a cubin or a shared library: the driver JITs it for whatever card is
+  present, so one artifact covers every architecture and loading needs no CUDA
+  runtime. Built by nvcc on first use, gitignored, exactly the bargain lmz
+  already makes.
+- **One card, one architecture.** RTX 5080, sm_120. Nothing here has run on
+  Ampere, Ada, Turing or Hopper, and there is no non-NVIDIA device path at all.
+- Chunk-size effects above are two points, not a curve. The middle has not been
+  measured.
+
+## The BF16 blocker, fixed on our side — 2026-08-30
+
+*The earlier section said lmz's conditioned codec was one its own GPU kernel
+could not read, and left it there as lmz's problem. It is our problem, and it
+is fixed without touching lmz.*
+
+### The fix is a writer-side choice, and it costs almost nothing
+
+lmz only *attempts* its conditioned BF16 codec when a chunk holds at least
+`COND_MIN_ELEMS` = 1M elements — 2 MiB for BF16. Compress below that and it
+never reaches the conditioned path, emitting `CODEC_BF16`: two independent
+planes, which is exactly the shape the batch decoder takes.
+
+| chunk size | ratio | saved | chunks | codecs |
+|---|---|---|---|---|
+| 8 MiB (lmz's default) | 0.6709 | 32.9% | 225 | 224 × `BF16C` |
+| **1 MiB** | 0.6734 | **32.7%** | 1788 | **1787 × `BF16`** |
+
+**Two tenths of a point of ratio buys the entire GPU decode path**, and the
+encode ran *faster* at the smaller chunk size (1.39 against 1.13 GB/s).
+`lmsluice.gpu_chunk_size()` returns the threshold, reading it from lmz rather
+than hardcoding it, and `lmsluice plan` now says so on any archive that needs
+it.
+
+Decoding `CODEC_BF16C` itself remains genuinely impossible through the shipped
+ABI, and that is worth stating precisely rather than as a complaint: the
+conditioned form partitions sign and mantissa into per-bucket streams of
+**unequal length**, and `lmz_gpu_decode_batch_dev` requires every stream in a
+batch to decode to the same size. There is no arrangement of the arguments that
+expresses it. Avoiding the codec is the only route from outside lmz, and it is
+cheap enough that it is arguably the better one anyway.
+
+### Two correctness bugs the byte-level check caught
+
+**`CODEC_BF16` does not split on byte boundaries.** It splits on bfloat16's own
+fields — plane A holds the 8 exponent bits, plane B the sign in bit 7 with 7
+mantissa bits below. Reassembling those as a high and low byte produces output
+of exactly the right length and entirely the wrong values, and passes every
+shape check. The kernel now mirrors `merge_bf16_scalar` in lmz's `lmzcore.c`:
+`w = ((b & 0x80) << 8) | (a << 7) | (b & 0x7F)`.
+
+**On real weights, plane 1 is not coded at all.** Sign and mantissa measure
+7.92 bits of 8, so lmz stores them raw — every BF16 chunk is one rANS plane and
+one stored plane. An early version wove stored planes in afterwards with a
+byte-wise scatter, which is meaningless for a bit-field split. Coded and stored
+planes now arrive in two buffers and the merge takes both.
+
+### Measured, BF16 checkpoint at 1 MiB chunks
+
+Cold, best of three, all byte-identical to the source after copying out of VRAM:
+
+| route | GB/s | |
+|---|---|---|
+| plain → VRAM | **2.76** | reads 1.87 GB |
+| host-decode → VRAM | 1.88 | |
+| device-decode → VRAM | 2.01 | **kernels 101 GB/s**, 100% on device, 1.26 GB over PCIe |
+
+**The decoder is no longer the constraint.** 101 GB/s against lmz's own
+published 111 for the same kernel — the gap that was 50× is gone, and what
+closed it was fixing our dispatch rather than anything in lmz:
+
+- reading 1787 chunks one at a time became a coalesced parallel fetch through
+  the same transport every other route uses;
+- the stored plane was being concatenated into a host buffer before upload,
+  which cost 0.49 s of pure interpreter memcpy on a 1.87 GB model — reads now
+  go into writable buffers via `preadv` so those bytes reach the device without
+  a copy;
+- the PTX module was being JIT-compiled **on every call to `to_device`**, about
+  half a second each time, and is now built once per context.
+
+### Why it still does not beat the plain file here
+
+Device-decode moves 1.26 GB where plain moves 1.87 and decodes at 101 GB/s, and
+is still slower. That is this box, not the arithmetic: **the "cold" read here is
+the Windows host cache at about 5.8 GB/s**, because the guest page cache can be
+dropped and the hypervisor's cannot. At that speed the 33% byte saving is worth
+about 0.11 s and does not cover the route's remaining dispatch. Against this
+machine's genuinely cold first-touch rate of 2.3 GB/s, or any disk slower than
+that, the gate says device-decode wins by the full 1/f = 1.49×. That case has
+not been run, because this machine cannot produce it twice.
+
+The stream-count effect from the earlier section still holds and is visible
+here in the other direction: the 151 MB fp32 model yields 72 streams and its
+kernels manage 1 GB/s, while the 1.87 GB BF16 model yields 3574 and reaches
+101. **An lmz stream is 8 lanes wide however large it is, so device decode is a
+function of chunk count, and small models cannot fill a GPU.**
+
+## The upload stage, as a curve — 2026-08-30
+
+*Requested after the device route's rate moved between builds and the cause was
+found to be within-build variance in one stage. This characterises that stage as
+a mechanism with parameters rather than as a number, so it re-evaluates on a
+machine nobody here has.*
+
+### The measurement
+
+512 MiB moved host-to-device per point, median of 5, RTX 5080 on Gen4 ×16.
+Call size varied by changing how much each `cuMemcpyHtoDAsync` carries.
+
+| per call | calls | pageable GB/s | pinned GB/s |
+|---|---|---|---|
+| 64 KiB | 8192 | 1.49 | 1.54 |
+| 256 KiB | 2048 | 3.46 | 4.13 |
+| **512 KiB** | 1024 | **6.63** | 9.15 |
+| 1 MiB | 512 | 7.89 | 12.12 |
+| 4 MiB | 128 | 13.75 | 20.62 |
+| 16 MiB | 32 | 15.36 | 26.08 |
+| 256 MiB | 2 | 15.90 | 28.20 |
+
+### The parameters, which are what travels
+
+Least-squares fit of `t_call = overhead + n / BW` over the whole sweep:
+
+| | per-call overhead | asymptotic bandwidth | crossover `n = overhead × BW` |
+|---|---|---|---|
+| pageable | **54.6 µs** | 15.9 GB/s | **0.87 MB** |
+| pinned | **47.6 µs** | 28.3 GB/s | **1.35 MB** |
+
+The crossover is the transfer size at which per-call overhead stops dominating —
+below it you are paying for calls, above it for bytes. **The device route sends
+512 KiB per call**, because that is one stored plane of a 1 MiB chunk, and 512 KiB
+is *below* both crossovers. That is the whole defect, stated as a size rather than
+as a rate.
+
+**Concurrency does not rescue it**, which was worth checking rather than assuming:
+at the route's own 512 KiB call size, 1 stream gives 11.33 GB/s and 2, 4 and 8
+streams give 7.66, 7.40 and 7.48. More streams is *worse*, so the overhead is
+serialised inside the driver rather than being queue depth waiting to be filled.
+
+### What it predicts elsewhere
+
+- **A Gen5 ×16 link** doubles bandwidth and leaves per-call overhead alone —
+  overhead is CPU and driver work, not link time. So the crossover moves **up**,
+  to ~1.74 MB pageable and ~2.70 MB pinned, and **the defect gets worse on a
+  faster link**: the same 512 KiB call falls further below the knee. A machine
+  twice as capable would show a larger shortfall from the same code.
+- **A unified-memory host — Apple silicon, Strix Halo — has no upload stage at
+  all.** There is no discrete device memory to copy into, so both this defect and
+  its fix are absent, and the device-decode route's arithmetic loses one of its
+  three stages entirely. Anyone reading the numbers above as a property of the
+  *design* rather than of *this link* will over-weight them; on roughly half the
+  target envelopes in `blueprint.md` §1 this section describes nothing.
+- **A slower link** (Gen3, Thunderbolt, an eGPU) moves the crossover **down** and
+  makes the current call size relatively less bad.
+
+### The fix, still not implemented
+
+Batch the stored planes through a **pinned** staging buffer, which moves both
+terms: pinned lowers per-call overhead 54.6 → 47.6 µs and nearly doubles the
+asymptote, and batching raises the call size past the crossover. It is not done,
+deliberately — it costs back a host-side copy separately measured at **0.49 s** on
+1.87 GB, and choosing between those is a measurement job rather than part of the
+restructuring this was queued behind. It remains the first thing to try.
+
+## Route rates with their spread — 2026-08-30
+
+*Every route claim in this file and in `README.md` rests on these. Nine runs each,
+cache dropped before every run, on the box described at the top.*
+
+| model | route | best | median | worst | spread |
+|---|---|---|---|---|---|
+| Llama BF16 1.87 GB, 1 MiB chunks | plain → VRAM | 3.16 | **3.10** | 2.53 | 1.25× |
+| | host-decode → VRAM | 2.29 | **2.22** | 2.16 | 1.06× |
+| | device-decode → VRAM | 1.71 | **1.36** | 1.12 | 1.53× |
+| whisper fp32 151 MB | plain → VRAM | 0.62 | **0.56** | 0.47 | 1.33× |
+| | host-decode → VRAM | 0.52 | **0.50** | 0.34 | 1.52× |
+| | device-decode → VRAM | 1.47 | **1.39** | 0.91 | 1.62× |
+
+All GB/s of plain bytes. **The device route is the widest-spread of the three on
+both models**, which is consistent with the upload curve above: it is the only
+route whose dominant stage sits below the crossover, so it inherits that stage's
+variance.
+
+**The fp32 device claim survives the error bar.** Median to median it is
+1.39 / 0.56 = **2.48×**, and even the worst device run against the best plain run
+is 0.91 / 0.62 = 1.47×. The README's "about 2× plain" is supported rather than
+flattered by a lucky sample.
+
+**The BF16 device route is genuinely slower than plain here** — 1.36 against 3.10
+at the median — and that is the box, not the arithmetic: "cold" on this machine is
+the Windows host cache at ~5.8 GB/s, so a 33% byte saving buys about 0.11 s and
+does not cover a stage sitting below its crossover. Against the genuine
+first-touch rate of 2.3 GB/s the gate predicts device-decode wins by 1/f = 1.49×,
+and **that case has not been run**.
+
+## The byte-identity checks passed for months while a race was live
+
+*Written down because the reassuring reading of that sentence is the wrong one.*
+
+`Model.to_device` stages through two pinned buffers used alternately, and guarded
+reuse with `if pending is pin: stream.synchronize()`. `pending` held the **most
+recent** buffer, which with two alternating buffers is never the one about to be
+reused — **so the guard never fired.** Every staging window was written into a
+buffer whose own host-to-device copy might still have been in flight, on both the
+plain and host-decode routes into VRAM.
+
+Both routes are covered by SHA-256 byte-identity checks, and those checks passed.
+They passed because **the race loses almost every time**: reading and decoding the
+next window takes longer than the copy of the previous one, so the corruption
+window is narrow and the check is not sensitive to it. It surfaced once, as a
+single `DIFFER` in a sweep that had passed immediately before and passed again
+immediately after.
+
+The lesson is about evidence rather than about CUDA. **A passing correctness check
+is not evidence that a bug is absent — it is evidence that the bug did not fire
+this time.** Where a failure is intermittent, re-running until green destroys the
+only signal there was. The fix was to synchronise before reusing any buffer, and
+the test that now covers it (`test_many_small_windows_still_land_intact`) drives
+an 8 KiB window so that buffer reuse dominates rather than reading, making the
+race likely instead of rare.
+
+### The 29% prediction error, re-measured
+
+The README's "the plan is wrong for the first time, by 30%" was originally
+best-of-three. Re-measured under the nine-run discipline: host-decode into VRAM on
+the 8 MiB-chunk BF16 archive predicted **1.05 GB/s**, measured median **0.75 GB/s**
+over nine cold runs (0.65–0.79), an error of **29%**. The figure survives the
+stricter measurement, so the sentence keeps its number.
+
+## Phase 0 — the case where it pays, measured at last — 2026-08-30
+
+*Every earlier number in this file was taken on a link where compression is a
+tax. This is the first measurement of the case the project exists for. The link
+is a 9p mount from WSL2 to the Windows host — **a sample of the sub-1-GB/s
+class, not a target**; it is a WSL2 artefact and the finding is the link rate
+and the gate, not the filesystem.*
+
+Fixtures are synthetic BF16 with per-row lognormal scales, generated at three
+sizes from one generator so the **ratio is constant (f = 0.673) and size is the
+only variable**. 1 MiB chunks, so every chunk is GPU-readable `CODEC_BF16`.
+
+### Loading from the slow link
+
+Cache dropped before every run (`posix_fadvise` works on 9p), five runs, median.
+All byte-identical.
+
+| model | plain GB/s | coded GB/s | speedup |
+|---|---|---|---|
+| 64 MiB | 0.461 | 0.580 | 1.26× |
+| 256 MiB | 0.502 | 0.606 | 1.21× |
+| **1024 MiB** | 0.447 | **0.646** | **1.45×** |
+
+Ceiling from the ratio is 1.49×, so at 1 GiB the coded route reaches **97% of
+the maximum the ratio allows**. The plain route stays flat at 0.45–0.50 GB/s
+while the coded route climbs with size, which is the fixed costs amortising:
+**the win needs size, and it saturates by about a gigabyte.** That was the
+falsification criterion for this phase and it passed.
+
+### Saving to the slow link
+
+Three runs, median, fsync included on both sides.
+
+| model | plain s | coded s | speedup |
+|---|---|---|---|
+| 64 MiB | 0.29 | 0.26 | 1.10× |
+| 256 MiB | 1.13 | 0.96 | 1.18× |
+| **1024 MiB** | 4.50 | **3.55** | **1.27×** |
+
+Same shape, lower ceiling reached: 1.27× against 1.48×. **The write path leaves
+about 15% on the table and the arithmetic says why.** Writing the coded output
+takes 0.723 GB / 0.239 = 3.02 s and encoding takes 1.074 / 1.5 = 0.72 s. Fully
+overlapped that is 3.02 s; fully serial it is 3.74 s; measured is **3.55 s**, so
+roughly three quarters of the encode time is exposed rather than hidden under
+the write. The read path pipelines its stages and the write path does not. That
+is a concrete piece of work, not a mystery.
+
+### Two measurement traps, both of which would have inflated the result
+
+**`shutil.copyfile` is not a fair plain baseline on this link.** It manages
+0.106 GB/s where a 4 MiB-buffered write with fsync manages 0.239 — the link is
+per-call bound, so the buffer size dominates. Measured against `copyfile`, the
+write win reads as **2.99×**; measured against the best plain method it is
+**1.27×**. Two thirds of the apparent win was the baseline's buffer, not
+compression. A win that exceeds the ratio ceiling is the tell: 1/f is the most
+that moving fewer bytes can buy, so anything above it is the comparison being
+unfair somewhere.
+
+| plain write buffer | GB/s |
+|---|---|
+| 64 KiB | 0.150 |
+| 256 KiB | 0.192 |
+| 1 MiB | 0.239 |
+| 4 MiB | 0.246 |
+| 16 MiB | 0.249 |
+
+**And the link's write rate was wrong in the first place.** The 0.098 GB/s
+figure quoted in `docs/strategy.md` came from a single-threaded sequential write
+with a poor pattern. Written properly the link does **0.239 GB/s**, so the write
+gate against a 1.5 GB/s encoder is **6.3×**, not the 12.8× the strategy claimed.
+The conclusion is unchanged — 6.3× is still far above 1, so the write path is
+saturated and the ratio is the only limit — but the number was wrong and is
+corrected there.
+
+### What this does not cover
+
+No real network. No USB, SD or eMMC device. No phone. The 9p mount is one
+sample of the sub-1-GB/s class and every conclusion above should be read as
+"links of roughly this speed", not "this filesystem".
+
+## Compress on first fetch — built and measured — 2026-08-30
+
+*The supply-side answer, made real: `lmsluice/zstdcodec.py` (a codec that needs
+nothing installed) and `lmsluice/cache.py` (the decision about whether to use
+it). Same box, same 9p link as Phase 0.*
+
+### The stdlib codec
+
+Python 3.14 ships zstd, so this compresses and decompresses with nothing
+installed at all. On a 151 MB fp32 checkpoint: **35.9% saved**, encode 0.58 GB/s,
+and a self-measured decode rate written into the archive at build time.
+
+**It does not scale with threads, and that is a finding rather than a
+disappointment.** 16 blocks of 4 MiB, decoded on a pool:
+
+| threads | GB/s |
+|---|---|
+| 1 | **2.02** |
+| 2 | 1.51 |
+| 4 | 1.78 |
+| 8 | 1.79 |
+| 16 | 1.69 |
+
+More threads is *worse*. So the loader gains nothing from a pool for this codec
+and the honest rate to feed the gate is the single-threaded one — which caps it
+near 2 GB/s however many cores are present. That is a real difference from lmz's
+native kernel, it is fine below the gate where a no-dependency codec is aimed,
+and it is a reason not to reach for it above one.
+
+**This corrected a defect in the cache decision.** The first version measured
+decode on one thread over an 8 MiB sample — two blocks — and got 1.01 GB/s, and
+the gate then declined to cache at 1.12×, inside its own margin. The second
+version "fixed" it by measuring on a pool, on the assumption that the loader
+would parallelise; the table above says it cannot. What was actually wrong was
+the *sample*: two blocks is a sample of the safetensors header as much as of the
+weights. Sampling 64 MiB from the middle gives 2.18 GB/s and the gate then says
+**1.56× — build it**. Both wrong versions were wrong in the conservative
+direction, which is not the same as being safe.
+
+### The cache, end to end
+
+151 MB model on the 9p link, cache dropped before every run, five runs, median,
+every result byte-identical to the source:
+
+| | seconds | against plain |
+|---|---|---|
+| plain, on the slow link | 0.343 | — |
+| **coded, on the slow link** | **0.191** | **1.80×** — compression alone |
+| **coded, in the local cache** | **0.089** | **3.85×** — compression *and* a faster device |
+
+Ceiling from the ratio alone is 2.34×, so **the 3.85× is not all compression**
+and must not be quoted as though it were. The cache lives on local disk while
+the source is on the mount, so it delivers two effects at once: fewer bytes, and
+fewer bytes from somewhere faster. Both are real and the second is a legitimate
+property of putting a cache on fast storage — it is simply not the ratio.
+
+The tell was the same one as the write-path artefact earlier in this file: **a
+win above 1/f means the comparison is unfair somewhere**, because 1/f is the most
+that moving fewer bytes can buy. That rule has now caught two of my own
+measurements in one day.
+
+### What the decision does
+
+The gate that routes a read decides whether the cache is worth building, using
+the link rate from the profile and the codec's rate measured on *this file's own
+bytes*. On a fast NVMe it declines and says the plain file is the right cache
+entry. Nothing is cached without being asked, nothing is deleted, and an entry is
+bound to its source's path, size and mtime so an edited checkpoint misses rather
+than serving stale weights.

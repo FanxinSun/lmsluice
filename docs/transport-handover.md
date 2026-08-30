@@ -171,6 +171,15 @@ GB/s at f = 0.787 where the whole 1.87 GB file gave 1.25 GB/s at f = 0.671. A
 small sample amortises lmz's startup over less work and finds less redundancy.
 `probe --encode` wants a large sample or its answer is a lower bound.
 
+**Overlap is not free when two stages share a resource.** The pipeline reaches
+`max(stages)` when they bind on different hardware — disk versus CPU — and
+degrades toward `sum(stages)` as they bind on the same one. Decoding into
+pinned memory while the DMA engine drains it put the host-decode-to-VRAM route
+23% below its predicted rate, because both stages are on the memory bus that
+lmz's decoder already saturates. This is the model's one measured failure and
+it is recorded rather than patched: fitting a contention term to one machine
+would be exactly the mistake rule 1 forbids.
+
 **Decisions inside 1.15× are made on noise.** Decode timings swing 30–40% run
 to run on a desktop with other things open, so `plan.MARGIN` refuses to switch
 routes below that and plain wins ties. It is the route with no second failure
@@ -193,11 +202,27 @@ test failing against a fixture that did support ranges.
 3. **Metal**, written but never run; then **Vulkan**, which is what reaches
    AMD and Intel iGPUs on Windows and Linux with no toolkit. Order and reasons
    in `lmz/docs/portable-decoder-handover.md`.
-4. **No GPU decode has been driven through this tool.** `lmz.gpu` exists and
-   is measured in lmz's own documents; the CUDA rows here are lmz's numbers in
-   this package's arithmetic, not a measurement of the two together. When a
-   backend lands it enters as another codec rate in the profile and another
-   row in the plan — nothing above `plan.py` changes.
+4. **The device-decode route is built.** *(updated 2026-08-30: `devdecode.py`
+   drives `lmz_gpu_decode_batch_dev` on device pointers and `merge.cu` supplies
+   the plane transpose lmz stops short of. Fastest route into VRAM on fp32,
+   ~2x plain, byte-identical. Two limits, both measured: it wins on the link
+   rather than the decoder — the kernels reach ~2 GB/s not lmz's 111, because
+   an lmz stream is 8 lanes wide however large it is — and a BF16 checkpoint is
+   refused outright because lmz codes it as `CODEC_BF16C`, which its own GPU
+   kernel cannot read. That last one is lmz's to close and is the single
+   highest-value thing left. See the device-decode section of `MEASURED.md`.)*
+   The original entry follows.
+
+   **The device-decode route is priced and unbuilt.** *(updated 2026-08-30:
+   the RAM → VRAM path now exists — `lmsluice/cuda.py`, `Model.to_device`,
+   `plan.vram_plan` — and plain and host-decode both land byte-identical in
+   VRAM. PCIe is measured at 28.45 GB/s pinned through this tool.)* What is
+   still missing is decoding **on** the device: `lmz.gpu` is available here and
+   its ABI has the right entry point, but feeding
+   `lmz_gpu_decode_batch_dev` means decomposing a chunk into its per-plane rANS
+   streams, and lmz exposes decoding a file and reading a byte range, neither
+   of which is that. lmz's own handover names the same gap. See the RAM → VRAM
+   section of `MEASURED.md`.
 5. **One model, one dtype.** Every figure is BF16 from a single checkpoint.
    The ceiling on any win is 1/f, and lmz's own results put FP8 at 17% and
    Q4_K at 5%, where the ceiling is 1.05× and there is almost nothing to win.

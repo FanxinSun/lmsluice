@@ -1,33 +1,91 @@
-# lmsluice — the model load path, on whatever silicon the box has
+# lmsluice — the model transport facilitator
 
-A runtime that moves model weights from wherever they are to wherever they are
-needed, over the route that is actually faster on the machine it is running
-on. It decides by measurement, not by assumption, and it says what it decided
-and on what numbers. Pure software, pure standard library, and nothing about
-the bytes changes: every weight arrives byte-identical.
+Moves model weights from wherever they are to wherever they are needed, over
+the route that is actually faster **on the machine it is running on**. It
+decides by measurement rather than assumption, and it says what it decided and
+on what numbers. Pure standard library, and nothing about the bytes changes:
+every weight arrives byte-identical.
 
-The target is **transport**, not training and not inference. `vram/` owns
-training residency and has ruled out inference on its own roofline. This is
-the third case, and the only one that happens on every machine, every time a
-model is opened.
+## Who this is for
 
-```
-lmsluice probe  ./model.lmz          # measure this machine, once
-lmsluice plan   ./model.lmz          # which route is faster here, and why
-lmsluice bench  ./model.lmz --against ./model.safetensors   # check that answer
-lmsluice get    https://host/m.lmz ./model.safetensors      # move it
-```
+The decision it makes turns on one comparison — is the decoder faster than the
+link it is feeding from — and the two sides of that vary very differently. A
+decoder varies maybe 3× across CPUs. **The link varies by a factor of a
+hundred.**
 
-```python
-import lmsluice
+| link | GB/s | verdict |
+|---|---|---|
+| NVMe, warm in the host cache | 6.2 | **tax**, 0.17× |
+| NVMe, first touch | 2.4 | tax, 0.44× |
+| UFS 4.0 (phone flash) | 4.0 | tax, 0.26× |
+| **9p / network mount** | **0.26** | **pays** |
+| **SATA SSD** | 0.55 | **pays, ratio-capped** |
+| **eMMC / SD / USB** | 0.30 | **pays, ratio-capped** |
+| **1 Gb/s network** | 0.125 | **pays, ratio-capped** |
+| **a download** | 0.01 – 0.1 | **pays, and see below** |
 
-m = lmsluice.open_model("model.lmz")   # or .safetensors, or an https URL
-print(m.plan.explain())                # the route, the rates, the arithmetic
-weights = m.load()                     # one buffer, filled in parallel
+So the value is very nearly a function of one variable: **how slow the link
+is.** This is for every machine that is not reading from a fast local NVMe —
+most laptops, every phone, every network mount, every container pulling from
+object storage, and every download. On a fast local NVMe it will tell you to
+use the plain file, which is the point.
 
-for name, view in m.stream(budget=1 << 30):   # bounded memory, overlapped I/O
-    upload(name, view)
-```
+**Measured, not asserted** — a 1 GiB BF16 model over a 9p mount, cache dropped
+before every run, byte-identical. That mount is one sample of the sub-1-GB/s
+class and not a target; the finding is the link rate, not the filesystem:
+
+| | plain | coded | | runs |
+|---|---|---|---|---|
+| loading | 0.447 GB/s | **0.646** | **1.45×**, against a 1.49× ceiling | 5 |
+| saving | 4.50 s | **3.55 s** | **1.27×** | 3 |
+
+The win grows with model size and saturates by about a gigabyte; below a
+hundred megabytes fixed costs eat most of it. `MEASURED.md` has the sizes, the
+spread, and the two measurement traps that would have inflated both numbers.
+
+## Downloading a model
+
+The largest case, and the only one where the answer needs no measurement.
+
+Over a 10–100 MB/s link the decoder is two orders of magnitude faster, so it
+disappears entirely under the transfer and **you simply move fewer bytes** —
+arithmetic, not a gate. It also pays twice, in bytes not transferred *and* in
+load time not spent, at lmz's directory-level ratio rather than its shard-level
+one, because a checkpoint directory ships the same tensors more than once:
+
+    lmsluice get https://host/model.lmz ./model.safetensors
+
+Ranged GETs with a connection kept alive per thread, decoded as they land, so
+the archive never touches the disk in coded form. A server that refuses ranges
+is fetched once rather than refused.
+
+Exercised against a local range-serving server and a range-refusing one, both
+byte-identical. **Not yet run over a real wide-area link** — the arithmetic
+above is the link speed and the ratio, not a measurement of this path at that
+speed.
+
+## Compress on first fetch
+
+The reason you do not have to convert anything first.
+
+    lmsluice cache ./model.safetensors            # would it pay here?
+    lmsluice cache ./model.safetensors --build    # then build it
+
+The first load reads the plain file at its normal speed. Afterwards the model is
+compressed into a local cache, and every later load takes the coded route —
+measured at **1.80× from compression alone** on a slow link, **3.85×** with the
+cache on local disk, byte-identical, with nothing published and nothing
+installed.
+
+**Nothing installed** is literal: `lmsluice/zstdcodec.py` uses the standard
+library's zstd, so a machine with no lmz still gets a cache. lmz is preferred
+where present because it compresses better; it is an upgrade rather than a
+prerequisite.
+
+**And it is a decision, not a policy.** On a fast NVMe the right cache entry is
+the plain file, and it will tell you so rather than making every later load
+slower. Nothing is cached unless asked, nothing is deleted, and an entry bound to
+a file that has changed misses rather than serving stale weights.
 
 ## The one ratio
 
@@ -91,7 +149,7 @@ Move the decoder instead of the disk and it flips again:
 | lmz CUDA, shared table, RTX 5080 | 418 | free; 1.49× by the ratio |
 | a 2-CU display iGPU, **predicted** | 4 – 36 | pays at the floor of the interval |
 
-That last row is `../gate.py`'s job rather than this package's, and the
+That last row is `gate.py`'s job rather than this package's, and the
 interval is the honest state of it: the decoder's compute cost per byte is
 known from **one** point on **one** card, and that point fits a
 compute-bound and a bandwidth-bound reading equally well. The two readings
@@ -104,6 +162,104 @@ two are asserted to state the same identity in the test suite.
 floor of the interval, the smallest integrated GPU AMD ships decodes about 2×
 faster than the CPU decoder, on a device that is a display adapter rather than
 an APU. What does not survive is reading any one desktop's NVMe as *the* disk.
+
+## Into VRAM
+
+The second hop, built on the same two ideas. Two links now instead of one, and
+the route decides how many bytes cross each:
+
+    plain          max(N/L,  N/P)              N over both
+    host-decode    max(fN/L, N/Dh, N/P)        fewer off disk, all of it over PCIe
+    device-decode  max(fN/L, fN/P, N/Dd)       fewer over BOTH, decoded where it lands
+
+`device-decode` is the one worth having: the only route that shortens both
+links, and the only one whose decode is not competing with the host for memory
+bandwidth. It is **built** — `lmsluice/devdecode.py` drives lmz's shipped
+device decoder and adds the plane merge lmz stops short of — and on an fp32
+checkpoint it is the fastest route into VRAM — **2.48× plain at the median of
+nine cold runs** (1.39 against 0.56 GB/s; worst device run still 1.47× the best
+plain one) — moving 0.427 of the bytes over PCIe.
+
+**BF16 checkpoints decode on the GPU**, at **101 GB/s** against lmz's own
+published 111 for the same kernel. That took one writer-side choice: lmz only
+reaches its conditioned `CODEC_BF16C` — which no GPU kernel can read, because
+its per-bucket streams have unequal lengths and the batch ABI needs them equal
+— when a chunk holds a million elements or more. Compress at
+`chunk_size=1 MiB` and it emits `CODEC_BF16` instead, which the kernel reads.
+The cost is **0.2 points of ratio**: 32.9% saved becomes 32.7%.
+`lmsluice.gpu_chunk_size()` returns the threshold and `lmsluice plan` says so
+on any archive that needs it.
+
+What still bounds the route is stream count and this box's cache, not the
+decoder: an lmz stream is 8 lanes wide however large it is, so a small model
+cannot fill a GPU (a 151 MB model gives 72 streams and 1 GB/s; a 1.87 GB one
+gives 3574 and 101 GB/s). And "cold" on this machine is the Windows host cache
+at 5.8 GB/s, fast enough that a 33% byte saving does not pay for the dispatch —
+against genuinely cold storage the gate says device-decode wins by 1/f.
+`MEASURED.md` has it in full.
+
+```python
+buf = m.to_device()                              # a CUDA allocation, filled
+weights = torch.as_tensor(buf, device="cuda")    # zero copy; lmsluice imports no torch
+```
+
+The buffer carries `__cuda_array_interface__`, so torch, cupy and numba adopt it
+without a copy and without lmsluice depending on any of them. It reaches the
+device through the CUDA **driver** API via `ctypes` — the driver ships with the
+GPU, the runtime ships with the toolkit, and requiring a toolkit to load a model
+would repeat the mistake the probe exists to avoid.
+
+Measured on this box, cold before every run, every route SHA-256 identical to
+the source after copying back out of VRAM. **Nine runs each, median with the
+best/worst spread**, because one of these stages varies by more than the
+differences between them:
+
+| model | route | median GB/s | spread over 9 runs |
+|---|---|---|---|
+| Llama BF16 1.87 GB | plain → VRAM | **3.10** | 2.53 – 3.16 (1.25×) |
+| | host-decode → VRAM | **2.22** | 2.16 – 2.29 (1.06×) |
+| | device-decode → VRAM | **1.36** | 1.12 – 1.71 (1.53×) |
+| whisper fp32 151 MB | plain → VRAM | **0.56** | 0.47 – 0.62 (1.33×) |
+| | device-decode → VRAM | **1.39** | 0.91 – 1.47 (1.62×) |
+
+The device route has the widest spread of the three, and that is not noise about
+nothing: it is the only route whose dominant stage — the host-to-device upload —
+sits below its own crossover size, so it inherits that stage's variance.
+`MEASURED.md` characterises the upload as a curve with a per-call overhead of
+54.6 µs and a 0.87 MB crossover, and shows the defect getting **worse on a Gen5
+link** and vanishing entirely on a unified-memory host.
+
+PCIe measured 28.45 GB/s pinned against Gen4 x16's 28.8 theoretical, and 17.84
+pageable — 1.59× apart, which is why the staging buffers are page-locked.
+
+**This is where the plan is wrong for the first time.** By **29%** on the
+host-decode route of an 8 MiB-chunk BF16 archive — predicted 1.05 GB/s against a
+measured median of 0.75 over nine cold runs (0.65–0.79). It was first reported
+as 30% from best-of-three and survives the stricter measurement unchanged. The
+reason generalises: `max()` assumes overlapping stages are free, and they are not when
+they share a resource. Here the CPU decodes into one pinned buffer while the DMA
+engine reads the other, and both are on the memory bus — which lmz's decoder was
+already saturating. On a unified-memory machine every stage shares that bus, so
+what this box shows mildly, an Apple or Strix Halo part would show loudly.
+`MEASURED.md` has the numbers and the reason it has not been "fixed" in
+`plan.py`.
+
+## Platforms
+
+| | state |
+|---|---|
+| **Linux** | everything, on WSL2 |
+| **Windows** | read path and cold measurement **run and verified** on NTFS; no CUDA path tried there |
+| **macOS** | written, never executed — `fcntl(F_NOCACHE)`, and no CUDA at all |
+
+Windows cold reads work through `CreateFileW` with `FILE_FLAG_NO_BUFFERING` —
+the other half of the idea `posix_fadvise` gives on Linux, reachable from
+`ctypes` with nothing installed. Running it there found that **`os.pread` does
+not exist on Windows**, so every read in the package had been failing, not just
+the cold measurement; the fix gives each thread its own descriptor rather than
+locking a shared position, because a lock would turn the fetch stage's queue
+depth into one. `MEASURED.md` has the numbers and the two further bugs that
+only running it could surface.
 
 ## What it is
 
@@ -157,6 +313,13 @@ one command says so.
 
 ## Where the boundary is
 
+**[`docs/boundary.md`](docs/boundary.md) is the canonical statement**: two
+charters, the three-question test for any disputed piece of work, the ownership
+table, five invariants, the codec interface, and the loan register. Read it
+before adding a file to either tree. In one line — **lmz is the
+compressor/decompressor; lmsluice is the AI-model transport facilitator.**
+
+
 | | whose |
 |---|---|
 | the coded stream, its tables, its blocks, its index | **lmz** |
@@ -168,22 +331,52 @@ one command says so.
 | adapters — safetensors-compatible open, PyTorch, llama.cpp | **lmsluice** |
 | training residency across VRAM / RAM / SSD | `vram/` |
 
-The split against lmz is the one `lmz/docs/gpu-residency-handover.md` already
-draws, applied to a different consumer. Every use of lmz's internals is in
-`lmsluice/archive.py` and nowhere else; two of them are internals rather than
-public API — decoding one chunk, and a v7 archive's shared table set — because
-lmz exposes decompressing a *file* and reading a *byte range*, and neither is
-the shape a pipeline wants. Both are probed at open time and fall back to
-`lmz.MappedArchive`, which is public and stable, so a change in lmz makes this
-slower and not broken. `Archive.route` says which one is live, so a benchmark
-can never quietly measure the fallback.
+**The boundary is now published on both sides.** `docs/boundary.md` states it
+here — two charters, a three-question test, an ownership table, five invariants
+and a register of what is still on loan — and lmz has shipped the interface it
+asked for. `ArchiveIndex.chunks()` and `.decode(ref, payload, out=)` are public
+and, in lmz's own words, do *"No I/O, no threads"*, which is the invariant this
+package needed; `lmz.capabilities()` declares which decoders can read an archive
+instead of leaving the transport layer to reproduce an encoder threshold.
 
-**The one thing lmz should promote:** a public "decode this chunk into this
-buffer" entry point. It is the whole of the coupling.
+Every use of lmz is in `lmsluice/lmzcodec.py` and nowhere else, behind the
+interface in `codec.py`, and a test walks the package source to keep it that
+way. Three decode paths are probed in order and `Archive.route` names the live
+one, so a benchmark can never quietly measure a fallback: `public` on a current
+lmz, `direct` on one that predates `ArchiveIndex`, `mapped` on any lmz at all.
+
+**What is still on loan is `merge.cu`** — a CUDA byte-plane transpose that is
+lmz's work held here, because the device decoder returns plane-major bytes
+rather than plaintext. It is registered with the interface change that retires
+it and marked as such in its own header.
+
+## What it does not do yet
+
+Stated plainly, because a page that lists only what works is not a description.
+
+- **It does not hand you tensors.** `safetensors.torch.load_file()` returns a
+  dict of `torch.Tensor`; this returns a `memoryview` and a tensor index. The
+  dtype and shape are there and the conversion is a few lines, but until it is
+  written nobody can drop this in, and that is the single biggest thing between
+  the numbers above and anyone using them.
+- **It does not speak object storage.** Plain HTTP with range requests, no S3,
+  GCS or Azure, no auth. Which is awkward, because the download is the case with
+  the best arithmetic in this repository.
+- **It is not packaged.** No PyPI name, no remote, no version anyone can install.
+- **The stdlib codec does not scale with threads.** Measured: one thread
+  2.02 GB/s, sixteen 1.69. It caps near 2 GB/s however many cores are present,
+  which is fine below the gate and a reason to prefer lmz above it.
+- **The decoder is Python-bound at about 1 GB/s.** Fine below the gate, which is
+  where this is aimed, and not competitive above it.
+- **One machine of evidence.** No WAN, no object storage, no cluster, no second
+  GPU, no Apple silicon. Every number names its box for that reason.
+
+Where it stands against the alternatives, and what would change it, is in
+[`docs/strategy.md`](docs/strategy.md).
 
 ## Status
 
-Runs. 33 tests, no dependencies beyond the standard library and lmz.
+Runs. 66 tests, no dependencies beyond the standard library and lmz.
 
 ```
 python3 tests/test_lmsluice.py       # builds its own fixtures; skips what needs lmz
@@ -198,28 +391,54 @@ What exists:
 - `lmsluice/probe.py` — cold reads, sustained writes, and decode measured on the
   real archive with the thread count swept rather than assumed
 - `lmsluice/source.py` — local files and HTTP range requests behind one `pread`
-- `lmsluice/archive.py` — the lmz coupling, in one file
-- `lmsluice/model.py` — `map` / `load` / `stream`, one API over either route
+- `lmsluice/codec.py` — what this package needs from *a* codec, as an
+  interface rather than as lmz
+- `lmsluice/lmzcodec.py` — the lmz adapter: the only module that imports
+  lmz or knows a codec ID
+- `lmsluice/archive.py` — runs, coalescing and placement: the I/O half
+- `lmsluice/model.py` — `map` / `load` / `stream` / `to_device`, one API over
+  every route
+- `lmsluice/cuda.py` — the CUDA driver through ctypes: device buffers,
+  pinned staging, streams, and `__cuda_array_interface__` for zero-copy handoff
 - `lmsluice/cli.py` — `probe`, `plan`, `info`, `bench`, `get`, `write`, `doctor`
-- `../gate.py` — the device-side model: decode rate bounded from two sides,
-  the unmeasured constant carried as an interval, no imports so it runs on a
-  machine that has nothing installed
+- `lmsluice/gate.py` — the device-side model: decode rate bounded from two
+  sides, the codec's `k` carried as an interval with its provenance, and still
+  runnable with no dependencies on a machine that has nothing installed
 - `probe/igpu-bench.ps1` — the Direct3D 11 compute benchmark that feeds it,
   measuring whether a given device *could* decode
 
+[`docs/strategy.md`](docs/strategy.md) is where this is going and why — the
+argument that the value is nearly a function of link speed alone, what that
+says about the GPU work, and the phased plan with what would falsify each step.
+[`docs/boundary.md`](docs/boundary.md) is the division against lmz.
 [`docs/transport-handover.md`](docs/transport-handover.md) is the full record
 of how this was built and measured — the design decisions that were not
 obvious, the two corrections that changed it after it was written, the traps,
 and what each open item is blocked on.
 
-What is blocked on lmz, in order, unchanged from
-`lmz/docs/portable-decoder-handover.md`:
+What is blocked on lmz, re-derived against `main` rather than carried forward.
+The v7 item that used to head this list has moved rather than vanished, and the
+distinction is narrow enough to be worth stating exactly:
 
-1. **The CUDA kernel reading v7.** `--shared-tables` writes a format worth
-   3.8× on the GPU decoder and nothing collects it yet.
+- **lmz's kernel accepts a shared frequency table** — `gpu.decode_batch_dev`
+  takes one as `hdr` — so the *capability* is shipped and is no longer lmz's to
+  add.
+- **But a `--shared-tables` archive does not decode on the GPU today**, through
+  this package or any other. `devdecode.py` refuses `CODEC_SPLIT_ST` chunks and
+  passes `header=None`, so supplying the table is **our** work, not lmz's. It
+  has left the list below because it is no longer blocked on someone else, not
+  because it works.
+
+1. **A device decode that returns plaintext.** `gpu.decode_batch_dev` takes
+   device pointers, a caller's stream and a shared table, and returns
+   plane-major bytes; the plane merge is still this package's to do. Retiring
+   `merge.cu` is what closes it.
 2. **The Metal port**, written but never run — `lmz/scratchpad/gpu/metal/`.
-3. **Vulkan**, which is what opens this up: AMD and Intel iGPUs, Windows and
-   Linux, driver-level with no toolkit to find.
+3. **Vulkan.** No longer merely wanted: the cycles model in `gate.py` needs a
+   device's clock and shared-memory budget, and Direct3D 11 can report
+   neither — its shared-memory figure is fixed by the API rather than by the
+   hardware. Vulkan reaches the AMD and Intel iGPUs that make the difference
+   between a one-sided bound and a real prediction.
 
 When any of those lands, it enters here as another codec rate in the profile
 and another row in the plan. Nothing above `plan.py` changes, which is the

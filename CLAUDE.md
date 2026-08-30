@@ -4,6 +4,15 @@
 this in full, plus the environment, network and scope rules. This copy
 exists because `lmsluice/` is a repository of its own.*
 
+## Where work goes: `docs/boundary.md`
+
+**lmz is the compressor/decompressor; lmsluice is the AI-model transport
+facilitator.** Before adding anything to either tree, run the three-question
+test in [`docs/boundary.md`](docs/boundary.md): does it change if the *format*
+changes (lmz), if the *machine* changes (lmsluice), or both — in which case it
+is two pieces and must be split. That document also carries the five invariants
+and the loan register; the loans are load-bearing and must not be removed.
+
 ## This PC is the instrument, not the target — and here it is the whole point
 
 This project's subtitle is *"on whatever silicon the box has"*. Its entire
