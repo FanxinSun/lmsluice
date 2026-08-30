@@ -1552,6 +1552,36 @@ class TestGateModel(unittest.TestCase):
         self.assertFalse(built(True).can_pick,
                          "a single-point fit must not be quoted as a pick")
 
+    def test_the_model_reproduces_lmz_own_measured_occupancy(self):
+        """The cross-check that catches a wrong shared-memory budget.
+
+        lmz publishes both the occupancy it measured at and the compute
+        ceilings that occupancy implies, so on the one device where both sides
+        are known this model can be tested rather than trusted. It failed this
+        for a while: using the RTX 5080's 228 KiB per-SM pool gives 7 blocks a
+        unit where lmz measured 3, over-predicting residency 2.3x and every
+        compute ceiling with it. The opt-in per-block figure, 99 KiB, is what
+        lmz divides by and reproduces all of it.
+
+        Without this test the error is invisible, because the reference row is
+        bandwidth-bound either way and its printed decode rate does not move.
+        """
+        from lmsluice.lmzcodec import LmzCodec
+
+        published = LmzCodec.cost_model(None)
+        if published.blocks_per_unit_at_measurement.low is None:
+            self.skipTest("this lmz does not publish its measurement occupancy")
+        c = self.gate.cost_from(published)
+        ref = [d for d in self.gate.DEVICES if "5080" in d.name][0]
+        lo = int(published.blocks_per_unit_at_measurement.low)
+        hi = int(published.blocks_per_unit_at_measurement.high)
+        got = ref.blocks_per_unit(c)
+        self.assertGreaterEqual(got, lo, "residency over- or under-predicted")
+        self.assertLessEqual(got, hi,
+                             f"model derives {got} blocks/unit where lmz "
+                             f"measured {lo}-{hi}: the shared-memory budget "
+                             f"this uses is not the one lmz divides by")
+
     def test_the_small_igpu_row_stays_one_sided(self):
         """A tighter interval is not a measurement.
 

@@ -106,17 +106,19 @@ FALLBACK_PROVENANCE = (
     "lmz.gpu.cost_model('shared') as of lmz 1.3.0: k measured by a grid sweep "
     "at fixed byte traffic, 1 to 1191 blocks over identical input, linear in "
     "resident blocks to within 3% below 84 blocks and bending as bandwidth "
-    "takes over, on one RTX 5080. NOT a single-point fit, and lmz's own words "
-    "for the derivation are 'over the rows below saturation' -- the "
-    "compute-bound regime, which is the one a small device runs in. THE REST "
-    "OF THIS SENTENCE IS OUR READING AND NOT LMZ'S: the earlier 230-330 came "
-    "from an occupancy sweep at 64-384 threads a block, and on this card that "
-    "sweep sits in the bandwidth-bound region -- 418 GB/s measured against a "
-    "compute ceiling above 1200 -- so a k divided out of it is bounded by the "
-    "memory system rather than by the kernel, which is consistent with the "
-    "corrected value being lower. lmz does not characterise its own earlier "
-    "number this way. One device either way: no low-FLOP-per-byte part has "
-    "been measured.")
+    "takes over, on one RTX 5080. NOT a single-point fit. Why it moved is "
+    "lmz's own account in cost_model()['provenance']['supersedes'] as of lmz "
+    "e8afb10, and it is neither 'the old value was wrong' nor 'the old sweep "
+    "was bandwidth-bound': the old sweep was MIXED, and fitting one constant "
+    "across rows governed by different resources is the defect. At 64 threads "
+    "a block the kernel is compute-bound (245.7 GB/s against a 264 ceiling); "
+    "from 96 threads up it is bandwidth-bound (417.3 against 791 at 384). One "
+    "compute row and six memory rows averaged into one interval -- which is "
+    "why the old low end was nearly right, carried by the single good row, "
+    "and its high end was not. (217, 248) is the same quantity taken only "
+    "where compute binds: a refinement of a badly-conditioned fit, not a "
+    "contradiction. Nothing about the kernel changed. One device either way: "
+    "no low-FLOP-per-byte part has been measured.")
 
 # The occupancy the k interval was measured under: lmz publishes it as a range,
 # 3 to 4 blocks resident per SM. This is not a footnote, it is what the interval
@@ -402,9 +404,13 @@ class Device:
 
 DEVICES = [
     Device("RTX 5080 (dGPU)", 960.0,
-           "bus and clock from lmz cost_model() provenance; 84 SMs x 228 KiB "
-           "shared, 2048 threads/SM",
-           units=84, shmem_per_unit=228 << 10, max_threads_per_unit=2048,
+           "bus and clock from lmz cost_model() provenance; 84 SMs, 2048 "
+           "threads/SM, and 99 KiB of shared memory per unit -- the opt-in "
+           "per-block figure lmz derives residency against, NOT the 228 KiB "
+           "per-SM pool. Using the pool over-predicts residency 2.3x and "
+           "reproduces none of lmz's published ceilings; 99 KiB reproduces "
+           "all of them. See the occupancy test.",
+           units=84, shmem_per_unit=101_376, max_threads_per_unit=2048,
            clock_ghz=2.66, gflops=53_691,
            occupancy_verified=True),   # lmz measured k on this device
     Device("M4 Max (unified)", 546.0,
@@ -422,16 +428,19 @@ DEVICES = [
            gflops=2_500),
     Device("Radeon 2-CU (iGPU)", 59.4,
            "bus measured, MEASURED.md; clock 2.2 GHz from that file's FMA "
-           "arithmetic; shared memory per WGP is an RDNA2 architectural "
-           "figure and IS NOT VERIFIED -- Vulkan on this device reports "
-           "maxComputeSharedMemorySize=32768, a per-workgroup cap rather than "
-           "the per-unit pool occupancy needs, and the kernel's request fits "
-           "it with room to spare. See the closing note.",
-           units=1, shmem_per_unit=128 << 10, max_threads_per_unit=2048,
+           "arithmetic; shared memory 32768 B, which is what Vulkan on this "
+           "device actually reports (maxComputeSharedMemorySize) -- the same "
+           "kind of per-block cap that reproduces lmz's occupancy on the "
+           "reference card. The kernel's 31744 B request fits it with 1024 B "
+           "to spare, so this budget holds ONE block per unit. An earlier "
+           "version used 128 KiB, an RDNA2 architectural pool figure nobody "
+           "read off this adapter, which gave four blocks and a 4x higher "
+           "row. See the closing note.",
+           units=1, shmem_per_unit=32_768, max_threads_per_unit=2048,
            clock_ghz=2.2, gflops=567),
-           # occupancy_verified stays False: 128 KiB per WGP is architectural,
-           # not read off this adapter, and it is the difference between four
-           # blocks and two.
+           # occupancy_verified stays False regardless: 32768 is a per-block
+           # cap and the per-unit pool is not something Vulkan exposes, so the
+           # row is a ceiling either way.
 ]
 
 # The other axis, and the one the first version of this gate left out: the
@@ -587,20 +596,25 @@ def _table(codec_cost=None) -> None:
     print("     the same bus. Every bandwidth figure here assumes the decoder has")
     print("     the memory system to itself, which on an iGPU it does not.")
     print()
-    print("AND THE CEILING ITSELF IS NOT SAFE. The lanes above assume this")
-    print("device holds four blocks per unit. Vulkan reports its per-workgroup")
-    print("shared-memory cap as 32768 B against the kernel's request -- so it")
-    print("fits, and how many such blocks a unit holds is not something Vulkan")
-    small_1 = Device(small.name, small.gb_s, small.source, units=1,
-                     shmem_per_unit=c.shmem_per_block(), 
-                     max_threads_per_unit=small.max_threads_per_unit,
-                     clock_ghz=small.clock_ghz)
-    one = small_1.compute_bound(c)
-    print("exposes. At one block per unit the row becomes "
-          f"{one[0]:.1f}-{one[1]:.1f} GB/s, which is")
-    print(f"BELOW the CPU decoder's {cpu:.1f}. The plausible range for this device")
-    print("therefore spans the CPU decoder, and nothing here establishes that the")
-    print("iGPU wins. That is a question for the measurement, not for the wording.")
+    print("AND THE BUDGET THAT PRODUCES IT IS THE UNCERTAIN PART. The row above")
+    print("uses 32768 B, which is what Vulkan on that device actually reports,")
+    print("and the kernel's request fits it with 1024 B to spare -- so ONE block")
+    print("per unit. That is the same kind of per-block figure that reproduces")
+    print("lmz's own measured occupancy on the reference card, where the 228 KiB")
+    print("per-SM pool does not: the pool gives 7 blocks where lmz measured 3.")
+    print("So this is the defensible reading, not the pessimistic one.")
+    optimistic = Device(small.name, small.gb_s, small.source, units=small.units,
+                        shmem_per_unit=128 << 10,
+                        max_threads_per_unit=small.max_threads_per_unit,
+                        clock_ghz=small.clock_ghz)
+    opt = optimistic.compute_bound(c)
+    print()
+    print("If instead the per-unit pool is the RDNA2 architectural 128 KiB -- a")
+    print(f"figure nobody has read off this adapter -- the row would be "
+          f"{opt[0]:.1f}-{opt[1]:.1f}")
+    print(f"GB/s. Vulkan does not expose the per-unit pool, so both readings stay")
+    print("open and the row stays a ceiling. What has changed is which one the")
+    print("evidence favours, and it is no longer the flattering one.")
 
 
 

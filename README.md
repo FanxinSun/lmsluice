@@ -185,7 +185,7 @@ Move the decoder instead of the disk and it flips again:
 | lmz CPU, through this transport | 5.95 | end to end | 0.94× |
 | lmz CUDA, per-chunk table, RTX 5080 | 111 | decode only | free; 1.49× by the ratio |
 | lmz CUDA, shared table, RTX 5080 | 418 | decode only | free; 1.49× by the ratio |
-| a 2-CU display iGPU, **predicted** | **≤ 7.8** | `gate.py`, projection | ≤ 1.23×, and no floor |
+| a 2-CU display iGPU, **predicted** | **≤ 1.9** | `gate.py`, projection | ≤ 0.30×, and no floor |
 
 ### The last row used to be an interval this page could not narrow
 
@@ -200,24 +200,27 @@ and *which one binds is a property of the device*. The separation came from
 measuring `k` across a grid sweep rather than at a single launch: a sweep across
 residency is precisely what tells a latency-bound cost from a bandwidth ceiling,
 because the two predict different slopes as blocks are added. `k` also moved,
-230–330 → 217–248 lane-cycles per decoded byte, and the direction matters more
-than the size. lmz's own words for the new derivation are *"over the rows below
-saturation"* — the compute-bound regime, the one a small device runs in.
+230–330 → 217–248 lane-cycles per decoded byte, and *why* it moved is lmz's own
+account in `cost_model()["provenance"]["supersedes"]`.
 
-*Our reading, not lmz's:* the earlier interval came from an occupancy sweep at
-64–384 threads a block, and on that card such a sweep sits in the
-bandwidth-bound region — 418 GB/s measured against a compute ceiling above 1200
-— so a `k` divided out of it is bounded by the memory system rather than by the
-kernel. That is consistent with the corrected value being lower, but lmz does
-not characterise its own earlier number that way and we have not asked it to.
+The defect was **not** that the old value was wrong, nor that its sweep was
+bandwidth-bound. It was **mixed**, and one constant was fitted across rows
+governed by different resources: at 64 threads a block the kernel is
+compute-bound (245.7 GB/s against a 264 ceiling), and from 96 threads up it is
+bandwidth-bound (417.3 against 791 at 384). One compute measurement and six
+memory ones, averaged into a single interval. That explains what a simpler story
+cannot — why the old interval's low end was nearly right, carried by the one good
+row, while its high end was not. 217–248 is the same quantity taken only where
+compute binds: a refinement of a badly-conditioned fit, not a contradiction, and
+nothing about the kernel changed between them.
 
 So the gate picks now, on the codec's published grounds rather than on our
 inference:
 
 | device | binding term | margin |
 |---|---|---|
-| RTX 5080 | **bandwidth** | 3.3× below its own compute ceiling |
-| 2-CU iGPU | **compute** | 3.3× below its own bandwidth ceiling |
+| RTX 5080 | **bandwidth** | 1.4× below its own compute ceiling |
+| 2-CU iGPU | **compute** | 13.4× below its own bandwidth ceiling |
 
 On a small integrated part the bandwidth reading is simply not live. That is
 what collapsed the 8×.
@@ -236,12 +239,27 @@ rather than read — and two things stay genuinely unverified:
    bus.** Every bandwidth figure here assumes the decoder has the memory system
    to itself, which on an integrated GPU it does not.
 
-And the founding caveat survives the narrowing unchanged. The lanes above assume
-the adapter holds four blocks per unit; Vulkan reports only a per-workgroup
-shared-memory cap, not the per-unit pool occupancy needs. **At one block per unit
-the row becomes 1.7 – 1.9 GB/s, below the CPU decoder.** The plausible range for
-this device still spans the CPU decoder, and nothing here establishes that the
-iGPU wins. That is a question for the measurement, not for the wording.
+### The narrowing did not rescue the founding claim — it removed it
+
+The row above uses **32,768 bytes** of shared memory per unit, because that is
+what Vulkan on that adapter actually reports, and the kernel's request fits it
+with 1,024 bytes to spare — so **one block per unit**. That is not a pessimistic
+choice. It is the same kind of per-block figure that reproduces lmz's own
+measured occupancy on the reference card, where the alternative does not: the
+RTX 5080's 228 KiB per-SM pool derives 7 blocks per unit where lmz measured 3,
+over-predicting residency by 2.3× and every compute ceiling with it. This page
+carried that error until the cross-check was written.
+
+So the honest reading is that the smallest integrated GPU AMD ships is predicted
+at **no more than 1.9 GB/s against the CPU decoder's 2.0 — at most 1.0×.** It
+does not win. If the per-unit pool turns out to be the RDNA2 architectural
+128 KiB, a figure nobody has read off this adapter, the row would be 6.8 – 7.8
+GB/s instead; Vulkan does not expose the per-unit pool, so both readings stay
+open and the row stays a ceiling with no floor. What changed is which reading the
+evidence favours, and it is no longer the flattering one.
+
+Nothing here establishes that the iGPU wins. That is a question for the
+measurement, not for the wording.
 
 What does not survive, either way, is reading any one desktop's NVMe as *the*
 disk.
