@@ -238,30 +238,20 @@ class TestPlan(unittest.TestCase):
         self.assertFalse(lose.coded)
 
     def test_gate_helper(self):
-        self.assertAlmostEqual(P.gate(2e9, 1e9), 2.0)
-        self.assertIsNone(P.gate(None, 1e9))
-        self.assertIsNone(P.gate(1e9, 0))
+        self.assertAlmostEqual(P.gate_ratio(2e9, 1e9), 2.0)
+        self.assertIsNone(P.gate_ratio(None, 1e9))
+        self.assertIsNone(P.gate_ratio(1e9, 0))
 
     def test_agrees_with_the_standalone_gate(self):
         """`plan.py` and `gate.py` state one identity and must not drift.
 
-        They are separate files on purpose -- `gate.py` predicts a decode rate
-        for a machine that is not here and has no imports so it can be run on
-        one, while this predicts nothing and prices what was measured. Since
-        neither can import the other without losing what makes it useful, the
-        agreement is pinned here instead.
+        They are separate modules on purpose -- `gate.py` predicts a decode
+        rate for a machine that is not here and must stay runnable with no
+        dependencies so it can be copied onto one, while `plan.py` predicts
+        nothing and prices what was measured. The agreement is pinned here
+        rather than removed by merging them.
         """
-        import importlib.util
-
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        spec = importlib.util.spec_from_file_location(
-            "gate", os.path.join(root, "gate.py"))
-        gate = importlib.util.module_from_spec(spec)
-        # Registered before executing: gate.py declares a dataclass, and
-        # dataclasses resolves annotations through sys.modules[__module__],
-        # which is absent for a module loaded straight off a path.
-        sys.modules[spec.name] = gate
-        spec.loader.exec_module(gate)
+        from lmsluice import gate
 
         N = 1 << 30
         for f in (0.05, 0.3, 0.653, 0.9, 0.99):
@@ -286,6 +276,16 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, *_a):
         pass
+
+    def copyfile(self, source, outputfile):
+        # On the no-Range path the whole body is written while the client,
+        # having taken the bytes it asked for, is already hanging up. Only
+        # that hang-up is swallowed: every other write error still reaches
+        # handle_error, so a genuine server-side failure is still visible.
+        try:
+            super().copyfile(source, outputfile)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
 
     def do_GET(self):
         rng = self.headers.get("Range") if self.ranges else None
@@ -331,6 +331,43 @@ class TestSources(unittest.TestCase):
             self.assertEqual(s.pread(1000, 64), self.data[1000:1064])
             with self.assertRaises(EOFError):
                 s.pread(s.size - 4, 64)
+
+    def test_the_no_pread_path_reads_the_same_bytes(self):
+        """Windows has no `os.pread`, so `FileSource` falls back to a
+        per-thread descriptor. Exercised here, on a platform that does have
+        `pread`, because otherwise the fallback is only ever run on the
+        machine nobody tests on -- which is how it came to be missing
+        entirely.
+        """
+        from lmsluice.source import FileSource
+
+        class NoPread(FileSource):
+            _HAS_PREAD = False
+
+        with NoPread(self.path) as s:
+            self.assertEqual(s.pread(1000, 64), self.data[1000:1064])
+            self.assertEqual(s.pread(0, len(self.data)), self.data)
+            with self.assertRaises(EOFError):
+                s.pread(s.size - 4, 64)
+
+    def test_the_no_pread_path_stays_concurrent(self):
+        """Threads must not share a file position. A lock around seek-then-read
+        would pass the test above and silently reduce the fetch stage's queue
+        depth to one, so what is checked is that concurrent reads at different
+        offsets each get their own bytes."""
+        import concurrent.futures as cf
+
+        from lmsluice.source import FileSource
+
+        class NoPread(FileSource):
+            _HAS_PREAD = False
+
+        with NoPread(self.path) as s:
+            offsets = list(range(0, 200_000, 1000))  # noqa: E501
+            with cf.ThreadPoolExecutor(8) as pool:
+                got = list(pool.map(lambda o: s.pread(o, 512), offsets))
+            for o, b in zip(offsets, got):
+                self.assertEqual(b, self.data[o:o + 512], f"at {o}")
 
     def test_seek_adapter_matches_a_real_file(self):
         with open_source(self.path) as s, open(self.path, "rb") as fh:
@@ -379,7 +416,8 @@ class TestModel(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         cls.plain = make_model(cls.dir)
-        cls.ref = open(cls.plain, "rb").read()
+        with open(cls.plain, "rb") as fh:
+            cls.ref = fh.read()
         cls.archive = os.path.join(cls.dir, "model.lmz")
         LMZ.compress(cls.plain, cls.archive)
         cls.mapped = os.path.join(cls.dir, "model.mapped.lmz")
@@ -449,7 +487,8 @@ class TestModel(unittest.TestCase):
         out = os.path.join(self.dir, "expanded.safetensors")
         with open_model(self.archive) as m:
             m.to_file(out, overwrite=True)
-        self.assertEqual(open(out, "rb").read(), self.ref)
+        with open(out, "rb") as fh:
+            self.assertEqual(fh.read(), self.ref)
 
     def test_map_is_refused_on_a_coded_target(self):
         from lmsluice.model import NotMappable
@@ -492,6 +531,77 @@ class TestModel(unittest.TestCase):
                 self.assertTrue(len(group) == 1 or hi - lo <= 8192)
 
 
+class TestColdRateHonesty(unittest.TestCase):
+    """A rate that is not cold must never be used as if it were.
+
+    Three defects with one theme, all found after the router was already
+    shipping. Each of these tests fails against the code as it was.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "blob.bin")
+        with open(self.path, "wb") as fh:
+            fh.write(os.urandom(4 << 20))
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_a_refused_cache_drop_is_not_a_cold_measurement(self):
+        """The bug: the failure string was truthy, so failure read as success.
+
+        posix_fadvise is refused on some filesystems -- tmpfs among them -- so
+        this fired on Linux too, and silently: the probe recorded a warm read
+        under the name `cold`.
+        """
+        from lmsluice import probe
+        from lmsluice.source import FileSource
+
+        class Refuses(FileSource):
+            def uncache(self, offset=0, length=0):
+                return False, "posix_fadvise refused: [Errno 22] Invalid argument"
+
+        with Refuses(self.path) as src:
+            st = probe.read_rate(src, sample=1 << 20, depths=(1,))
+        self.assertIsNone(st.cold)
+        self.assertIsNotNone(st.warm)
+        self.assertIn("refused", st.method)
+
+    def test_source_never_returns_the_warm_rate(self):
+        """The bug: `source` fell back to `warm`, a page-cache rate.
+
+        On a platform that cannot drop its cache that made the gate come out
+        about thirty times too small, so the router recommended the plain file
+        on every such machine -- including the ones where the coded route wins.
+        """
+        from lmsluice.rates import Storage
+
+        warm_only = Storage(key="k", cold=None, warm=40e9)
+        self.assertIsNone(warm_only.source)
+        self.assertEqual(warm_only.warm_bound, 40e9)
+
+        measured = Storage(key="k", cold=2.4e9, warm=40e9)
+        self.assertEqual(measured.source, 2.4e9)
+        self.assertIsNone(measured.warm_bound,
+                          "warm_bound is for when cold is missing, not always")
+
+    def test_layering_is_not_claimed_when_the_drop_failed(self):
+        """Layering is detected by two cold reads. Without a cold read there
+        is no detection to report, and `None` already means 'not ruled out'."""
+        from lmsluice import probe
+        from lmsluice.source import FileSource
+
+        class Refuses(FileSource):
+            def uncache(self, offset=0, length=0):
+                return False, "nope"
+
+        with Refuses(self.path) as src:
+            st = probe.read_rate(src, sample=1 << 20, depths=(1,))
+        self.assertIsNone(st.layered)
+
+
 @needs_lmz
 class TestProbe(unittest.TestCase):
     def test_probe_measures_and_round_trips_through_json(self):
@@ -510,7 +620,8 @@ class TestProbe(unittest.TestCase):
             self.assertGreater(codec.decode, 0)
             self.assertGreater(codec.ratio, 0)
             path = p.save(os.path.join(d, "profile.json"))
-            back = Profile.from_json(json.load(open(path)))
+            with open(path) as fh:
+                back = Profile.from_json(json.load(fh))
             self.assertEqual(back.codecs["lmz-cpu"].decode, codec.decode)
         finally:
             import shutil
@@ -526,6 +637,711 @@ class TestProbe(unittest.TestCase):
                         measured_at=time.time())
             path = p.save(os.path.join(d, "profile.json"))
             self.assertIsNone(Profile.load(path))
+        finally:
+            import shutil
+
+            shutil.rmtree(d, ignore_errors=True)
+
+
+try:
+    from lmsluice import cuda as _cuda
+
+    _CUDA_OK, _CUDA_WHY = _cuda.available()
+except Exception as exc:                  # noqa: BLE001
+    _CUDA_OK, _CUDA_WHY = False, str(exc)
+
+needs_cuda = unittest.skipUnless(_CUDA_OK, f"no CUDA device: {_CUDA_WHY}")
+
+
+class TestVramPlan(unittest.TestCase):
+    """The three-route arithmetic. No device needed -- rates are given."""
+
+    N, C = 1_000_000_000, 671_000_000
+
+    def test_device_decode_shortens_both_links(self):
+        """Its whole claim: fewer bytes over storage AND over PCIe."""
+        d = P.vram_plan(self.N, self.C, source=2.3e9, pcie=28.8e9,
+                        host_decode=1.05e9, device_decode=111e9)
+        routes = {r.name: r for r in d.routes}
+        self.assertLess(routes["device-decode"].device_bytes,
+                        routes["host-decode"].device_bytes)
+        self.assertLess(routes["host-decode"].device_bytes,
+                        routes["plain"].device_bytes)
+        self.assertEqual(d.chosen.name, "device-decode")
+
+    def test_host_decode_loses_to_a_disk_faster_than_the_cpu(self):
+        d = P.vram_plan(self.N, self.C, source=6.3e9, pcie=28.8e9,
+                        host_decode=1.05e9, device_decode=None)
+        self.assertEqual(d.chosen.name, "plain")
+
+    def test_host_decode_wins_on_a_slow_disk_with_no_gpu_decoder(self):
+        d = P.vram_plan(self.N, self.C, source=0.55e9, pcie=28.8e9,
+                        host_decode=1.05e9, device_decode=None)
+        self.assertEqual(d.chosen.name, "host-decode")
+
+    def test_unmeasured_pcie_makes_no_claim(self):
+        d = P.vram_plan(self.N, self.C, source=2.3e9, pcie=None,
+                        host_decode=1.05e9, device_decode=111e9)
+        self.assertFalse(d.confident)
+        self.assertEqual(d.chosen.name, "plain")
+
+    def test_ties_go_to_the_route_that_moves_less(self):
+        """Both read-limited at 1/f, so they finish together; the one that puts
+        less on PCIe is still the better choice."""
+        d = P.vram_plan(self.N, self.C, source=0.1e9, pcie=28.8e9,
+                        host_decode=50e9, device_decode=50e9)
+        self.assertEqual(d.chosen.name, "device-decode")
+
+
+@needs_cuda
+class TestCuda(unittest.TestCase):
+    """The driver binding. Skipped wholesale on a machine with no device."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ctx = _cuda.Context()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ctx.close()
+
+    def test_device_info(self):
+        info = _cuda.device_info()
+        self.assertTrue(info["name"])
+        self.assertGreater(info["total_bytes"], 0)
+
+    def test_roundtrip_through_vram(self):
+        for src in (bytes(range(256)) * 512,            # read-only
+                    bytearray(os.urandom(64 << 10))):   # writable
+            with self.ctx.allocate(len(src)) as buf:
+                buf.copy_from(src)
+                self.assertEqual(bytes(buf.to_host()), bytes(src))
+
+    def test_pinned_async_copy(self):
+        data = os.urandom(1 << 20)
+        with self.ctx.pinned(1 << 20) as pin, self.ctx.stream() as stream:
+            pin.view()[:] = data
+            with self.ctx.allocate(1 << 20) as buf:
+                buf.copy_from(pin, stream=stream)
+                stream.synchronize()
+                self.assertEqual(bytes(buf.to_host()), data)
+
+    def test_cuda_array_interface_is_well_formed(self):
+        """The contract a tensor library reads. Wrong here means torch adopts
+        the wrong bytes silently, so it is checked field by field."""
+        with self.ctx.allocate(4096) as buf:
+            i = buf.__cuda_array_interface__
+            self.assertEqual(i["shape"], (4096,))
+            self.assertEqual(i["typestr"], "|u1")
+            self.assertEqual(i["version"], 3)
+            self.assertIsNone(i["strides"])
+            ptr, readonly = i["data"]
+            self.assertGreater(ptr, 0)
+            self.assertFalse(readonly)
+
+    def test_a_copy_past_the_end_is_refused(self):
+        with self.ctx.allocate(1024) as buf:
+            with self.assertRaises(ValueError):
+                buf.copy_from(bytes(2048))
+
+
+@needs_cuda
+@needs_lmz
+class TestToDevice(unittest.TestCase):
+    """The path itself, end to end, byte for byte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.plain = make_model(cls.dir)
+        with open(cls.plain, "rb") as fh:
+            cls.ref = fh.read()
+        cls.archive = os.path.join(cls.dir, "model.lmz")
+        LMZ.compress(cls.plain, cls.archive)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def test_both_routes_land_identical_bytes_in_vram(self):
+        for target in (self.plain, self.archive):
+            with open_model(target) as m:
+                dev = m.to_device()
+                try:
+                    self.assertEqual(bytes(dev.to_host()), self.ref, target)
+                finally:
+                    dev.close()
+
+    def test_a_window_smaller_than_the_model_still_lands_whole(self):
+        """Staging is a window, so the seams are where this breaks."""
+        with open_model(self.archive) as m:
+            dev = m.to_device(window=4096)
+            try:
+                self.assertEqual(bytes(dev.to_host()), self.ref)
+            finally:
+                dev.close()
+
+    def test_many_small_windows_still_land_intact(self):
+        """Staging buffers are reused, and reuse is where a DMA race lives.
+
+        A tiny window forces many wraparounds of the pinned pair, so a buffer
+        overwritten while its own copy is still in flight shows up as wrong
+        bytes. With the guard written incorrectly this failed intermittently
+        and passed most of the time, which is why the window is small enough
+        here to make the reuse dominate rather than the reading.
+        """
+        for target in (self.plain, self.archive):
+            with open_model(target) as m:
+                dev = m.to_device(window=8192)
+                try:
+                    self.assertEqual(bytes(dev.to_host()), self.ref, target)
+                finally:
+                    dev.close()
+
+    def test_windows_are_cut_on_block_boundaries(self):
+        """Otherwise a block straddling a seam is decoded twice."""
+        with open_model(self.archive) as m:
+            spans = [(m._base, m._end)]
+            windows = m._device_windows(spans, 4096)
+            edges = {c.dst + c.rlen for c in m._arc.chunks_for(spans)}
+            edges.add(m._end)
+            for _lo, hi in windows:
+                self.assertIn(hi, edges)
+
+    def test_device_plan_prices_three_routes(self):
+        with open_model(self.archive) as m:
+            names = [r.name for r in m.device_plan().routes]
+            self.assertEqual(names, ["plain", "host-decode", "device-decode"])
+
+
+@needs_cuda
+@needs_lmz
+class TestDeviceDecode(unittest.TestCase):
+    """Coded bytes over PCIe, plaintext made in VRAM."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        # fp32, so lmz codes it as CODEC_SPLIT -- independent rANS planes,
+        # which is the shape the device decoder takes. A BF16 fixture would
+        # come out CODEC_BF16C and exercise only the fallback.
+        rng = random.Random(11)
+        tensors = {}
+        for i in range(6):
+            rows = 512 + i * 128
+            raw = struct.pack(f"<{rows * 32}f",
+                              *[rng.gauss(0, 0.02) for _ in range(rows * 32)])
+            tensors[f"w{i}"] = ("F32", (rows, 32), raw)
+        cls.plain = write_safetensors(
+            os.path.join(cls.dir, "m32.safetensors"), tensors)
+        with open(cls.plain, "rb") as fh:
+            cls.ref = fh.read()
+        cls.archive = os.path.join(cls.dir, "m32.lmz")
+        LMZ.compress(cls.plain, cls.archive)
+        cls.ctx = _cuda.Context()
+        from lmsluice.devdecode import DeviceDecoder
+
+        cls.dd = DeviceDecoder(cls.ctx)
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+
+        cls.ctx.close()
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def test_the_fixture_really_is_the_shape_under_test(self):
+        """Guard against the test quietly passing on the fallback path."""
+        from lmsluice.archive import Archive
+
+        with Archive(self.archive) as arc:
+            codecs = {u.opaque.codec
+                      for u in arc.chunks_for([(0, arc.plain_bytes)])}
+        self.assertIn(2, codecs, "fixture should contain CODEC_SPLIT chunks")
+
+    def test_decodes_in_vram_byte_identically(self):
+        if not self.dd.available:
+            self.skipTest(self.dd.why)
+        with open_model(self.archive) as m:
+            dev = m.to_device(route="device")
+            try:
+                self.assertEqual(bytes(dev.to_host()), self.ref)
+                self.assertEqual(m.device_route, "device")
+                self.assertGreater(m.device_stats.device_share, 0.9)
+            finally:
+                dev.close()
+
+    def test_only_coded_bytes_cross_the_link(self):
+        """The claim that makes this route worth having."""
+        if not self.dd.available:
+            self.skipTest(self.dd.why)
+        with open_model(self.archive) as m:
+            dev = m.to_device(route="device")
+            try:
+                self.assertLess(m.device_stats.coded_bytes_uploaded,
+                                m.plain_bytes)
+            finally:
+                dev.close()
+
+    def test_a_codec_it_cannot_read_falls_back_and_says_why(self):
+        from lmsluice.archive import Archive
+
+        with Archive(self.archive) as arc:
+            chunk = arc.chunks_for([(0, arc.plain_bytes)])[0]
+
+        class Rec:
+            codec, esize, flags = 5, 2, 0
+
+        class Conditioned:
+            rlen, dst, opaque = chunk.rlen, 0, Rec()
+
+        why = self.dd.takes(Conditioned())
+        self.assertIn("CODEC_BF16C", why)
+
+    def test_plane_header_parses_and_refuses_a_truncated_one(self):
+        from lmsluice.archive import Archive
+        from lmsluice.devdecode import planes_of
+
+        with Archive(self.archive) as arc:
+            chunk = [u for u in arc.chunks_for([(0, arc.plain_bytes)])
+                     if u.opaque.codec == 2][0]
+            payload = arc.fetch_chunk(chunk)
+        nplanes, nelem, planes = planes_of(chunk, payload)
+        self.assertEqual(nplanes, chunk.opaque.esize)
+        self.assertEqual(nplanes * nelem, chunk.rlen)
+        self.assertEqual(len(planes), nplanes)
+        self.assertIsNone(planes_of(chunk, payload[:4]))
+
+    def test_the_merge_kernel_transposes_correctly(self):
+        """Checked against the Python transpose it replaces, for each width."""
+        if not self.dd.available:
+            self.skipTest(self.dd.why)
+        import ctypes
+
+        for nplanes, name in ((2, "lmz_merge_2"), (4, "lmz_merge_4"),
+                              (8, "lmz_merge_8"), (3, "lmz_merge_n")):
+            nelem = 4096
+            planes = bytes((p * 31 + i) & 0xFF
+                           for p in range(nplanes) for i in range(nelem))
+            want = bytearray(nplanes * nelem)
+            for p in range(nplanes):
+                want[p::nplanes] = planes[p * nelem:(p + 1) * nelem]
+            src = self.ctx.allocate(len(planes))
+            dst = self.ctx.allocate(nplanes * nelem)
+            try:
+                src.copy_from(planes)
+                args = [ctypes.c_ulonglong(src.ptr), ctypes.c_ulonglong(dst.ptr)]
+                if name == "lmz_merge_n":
+                    args.append(ctypes.c_uint(nplanes))
+                args.append(ctypes.c_ulonglong(nelem))
+                self.dd.module.launch(name, (nelem + 255) // 256, 256, args)
+                self.ctx.synchronize()
+                self.assertEqual(bytes(dst.to_host()), bytes(want), name)
+            finally:
+                src.close()
+                dst.close()
+
+
+class TestZstdCodec(unittest.TestCase):
+    """The codec that needs nothing installed. No lmz in any of these."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        rng = random.Random(3)
+        tensors = {f"w{i}": ("BF16", (512,), bf16_bytes(rng, 512))
+                   for i in range(6)}
+        self.plain = write_safetensors(
+            os.path.join(self.dir, "m.safetensors"), tensors)
+        with open(self.plain, "rb") as fh:
+            self.ref = fh.read()
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_round_trips_byte_identically(self):
+        from lmsluice.zstdcodec import encoder
+
+        dst = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, dst)
+        with open_model(dst) as m:
+            self.assertEqual(bytes(m.load()), self.ref)
+
+    def test_the_archive_records_what_it_cost(self):
+        """The rates are in the container, so the second load needs no probe."""
+        from lmsluice.zstdcodec import encoder, open_codec
+
+        dst = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, dst)
+        c = open_codec(dst)
+        try:
+            self.assertGreater(c.measured_decode_rate or 0, 0)
+            self.assertIn("measured", c.cost_model().source)
+        finally:
+            c.close()
+
+    def test_a_corrupt_chunk_is_refused_not_returned(self):
+        """A silently wrong weight is worse than a slow one."""
+        from lmsluice.zstdcodec import encoder, open_codec
+
+        dst = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, dst)
+        c = open_codec(dst)
+        try:
+            u = c.units()[0]
+            bad = bytearray(c.source.pread(u.off, u.clen))
+            # Re-compress different plaintext: valid zstd, wrong bytes, so only
+            # the checksum can catch it.
+            from lmsluice.zstdcodec import _zstd
+
+            bad = _zstd().compress(b"\x00" * u.rlen, 1)
+            with self.assertRaises(ValueError):
+                c.decode_chunk(u, bad, memoryview(bytearray(u.rlen)), 0)
+        finally:
+            c.close()
+
+    def test_tensor_index_survives_into_the_archive(self):
+        from lmsluice.zstdcodec import encoder
+
+        dst = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, dst)
+        with open_model(self.plain) as a, open_model(dst) as b:
+            self.assertEqual(sorted(a.tensors), sorted(b.tensors))
+            for n in a.tensors:
+                self.assertEqual((a.tensors[n].start, a.tensors[n].end),
+                                 (b.tensors[n].start, b.tensors[n].end), n)
+
+    def test_it_declares_that_it_has_no_device_decoder(self):
+        from lmsluice.zstdcodec import encoder, open_codec
+
+        dst = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, dst)
+        c = open_codec(dst)
+        try:
+            cap = c.capabilities()
+            self.assertFalse(cap.device)
+            self.assertFalse(cap.derived, "no kernel to be uncertain about")
+        finally:
+            c.close()
+
+
+class TestCache(unittest.TestCase):
+    """Compress on first fetch — and only where the gate says it pays."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        rng = random.Random(5)
+        self.plain = write_safetensors(
+            os.path.join(self.dir, "m.safetensors"),
+            {f"w{i}": ("BF16", (4096,), bf16_bytes(rng, 4096))
+             for i in range(4)})
+        with open(self.plain, "rb") as fh:
+            self.ref = fh.read()
+
+    def tearDown(self):
+        import shutil
+
+        from lmsluice import cache
+
+        cache.clear(self.plain)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_it_refuses_without_a_measured_link(self):
+        """A cache built on a guess is the thing this package argues against."""
+        from lmsluice import cache
+        from lmsluice.rates import Profile
+
+        v = cache.worth_caching(self.plain, Profile())
+        self.assertFalse(v.worth_it)
+        self.assertIn("has not been measured", v.why)
+
+    def test_a_fast_link_is_told_to_keep_the_plain_file(self):
+        from lmsluice import cache
+        from lmsluice.rates import Profile, Storage, storage_key
+
+        p = Profile()
+        p.storage[storage_key(self.plain)] = Storage(key="k", cold=50e9)
+        v = cache.worth_caching(self.plain, p)
+        self.assertFalse(v.worth_it)
+        self.assertIn("plain file is the right cache entry", v.why)
+
+    def test_a_slow_link_is_told_to_cache(self):
+        from lmsluice import cache
+        from lmsluice.rates import Profile, Storage, storage_key
+
+        p = Profile()
+        p.storage[storage_key(self.plain)] = Storage(key="k", cold=0.05e9)
+        v = cache.worth_caching(self.plain, p)
+        self.assertTrue(v.worth_it, v.why)
+        self.assertGreater(v.speedup, 1.0)
+
+    def test_a_built_cache_serves_identical_bytes(self):
+        from lmsluice import cache
+
+        entry = cache.build(self.plain, codec="zstd")
+        try:
+            self.assertTrue(os.path.exists(entry))
+            with open_model(self.plain) as m:
+                self.assertTrue(m.from_cache)
+                self.assertEqual(m.route, "coded")
+                self.assertEqual(bytes(m.load()), self.ref)
+        finally:
+            cache.clear(self.plain)
+
+    def test_nothing_is_cached_merely_by_opening(self):
+        """Writing gigabytes as a side effect of opening a file is not a favour."""
+        from lmsluice import cache
+
+        with open_model(self.plain) as m:
+            m.load()
+        self.assertIsNone(cache.find(self.plain))
+
+    def test_an_edited_file_misses_rather_than_serving_stale_weights(self):
+        from lmsluice import cache
+
+        cache.build(self.plain, codec="zstd")
+        self.assertIsNotNone(cache.find(self.plain))
+        with open(self.plain, "r+b") as fh:      # touch size and mtime
+            fh.seek(0, os.SEEK_END)
+            fh.write(b"\x00")
+        self.assertIsNone(cache.find(self.plain),
+                          "a changed file must miss, never serve stale bytes")
+
+
+class TestBoundary(unittest.TestCase):
+    """The division in `docs/boundary.md`, enforced rather than described.
+
+    Walks the package *source* rather than the import graph, so a new module
+    that reaches across the line is caught the day it is written and not the
+    day someone happens to import it on a machine where lmz is absent.
+    """
+
+    PACKAGE = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lmsluice")
+
+    # The modules allowed to know lmz exists. `_lmz` finds it, `lmzcodec` is
+    # its adapter, `devdecode` is a registered loan (`merge.cu`'s dispatch).
+    # Every name here is a line in the loan register or an adapter itself.
+    ADAPTERS = {"_lmz.py", "lmzcodec.py", "devdecode.py"}
+
+    # Modules that implement a codec and therefore parse one coded stream by
+    # definition -- theirs. `zstdcodec` is the second implementation of the
+    # `Codec` protocol and the reason that protocol is no longer theoretical.
+    CODEC_ADAPTERS = {"lmzcodec.py", "zstdcodec.py"}
+
+    # Coded-stream vocabulary. A module outside the adapter mentioning these is
+    # parsing format structure, which is I4's line.
+    # Residue: vocabulary that cannot be derived from anything the adapter
+    # declares, and so has to be written down. Kept deliberately short, and
+    # each entry is here because there is no declaration to read it from --
+    # not because nobody got round to it.
+    FORMAT_RESIDUE = (
+        "TableSet",        # an lmz internal type, named in no public surface
+        "_chunk_decoder",  # likewise
+        "nplanes",         # the plane split is format structure with no API
+        "rANS",            # the coder's name
+    )
+
+    def format_words(self):
+        """The vocabulary, derived where it can be.
+
+        Hand-maintaining this list was the failure mode: fourteen entries is
+        past the point where a genuine miss is plausible, and the miss is
+        silent -- an encoder option lmz adds tomorrow would simply not be
+        checked. Codec IDs come from the adapter's own constants and encoder
+        option names from `encode_options()`, so the check grows when the
+        codec does.
+        """
+        words = list(self.FORMAT_RESIDUE)
+        try:
+            from lmsluice import lmzcodec
+
+            words += [n for n in dir(lmzcodec)
+                      if n.startswith(("CODEC_", "METHOD_", "COND_"))]
+            # Format and schedule options only. An `observe` option is a
+            # callback that touches neither the bytes nor the schedule, so
+            # naming one outside the adapter leaks nothing -- and its names
+            # are generic enough to collide with unrelated local API. The
+            # derived check caught `transport()`'s own `progress=` parameter,
+            # which is the collision this exclusion exists for.
+            words += [f"{name}=" for name, opt
+                      in lmzcodec.LmzEncoder().encode_options().items()
+                      if opt.kind != "observe"]
+        except Exception:                 # noqa: BLE001 -- no lmz, no extras
+            pass
+        return tuple(dict.fromkeys(words))
+
+    def sources(self):
+        for name in sorted(os.listdir(self.PACKAGE)):
+            if name.endswith(".py"):
+                with open(os.path.join(self.PACKAGE, name)) as fh:
+                    yield name, fh.read()
+
+    def test_only_the_adapters_import_lmz(self):
+        offenders = []
+        for name, src in self.sources():
+            if name in self.ADAPTERS:
+                continue
+            for line in src.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                # Matched as statements, not substrings: prose like "from
+                # lmz's published cost model" inside a description string is
+                # not an import, and a check that cannot tell the difference
+                # trains people to ignore it.
+                if (stripped.startswith(("import lmz", "from lmz",
+                                         "from ._lmz"))
+                        or stripped.startswith("from ._lmz import")):
+                    offenders.append(f"{name}: {stripped}")
+        self.assertEqual(offenders, [],
+                         "only the adapter may import lmz -- see docs/boundary.md")
+
+    def test_only_the_adapters_know_the_coded_stream(self):
+        offenders = []
+        for name, src in self.sources():
+            if name in self.ADAPTERS or name in self.CODEC_ADAPTERS:
+                continue
+            body = "\n".join(l for l in src.splitlines()
+                              if not l.strip().startswith("#"))
+            # The module docstring discusses the boundary by necessity; strip
+            # it before looking, so prose about the rule is not a breach of it.
+            if body.count('"""') >= 2:
+                body = body.split('"""', 2)[2]
+            for word in self.format_words():
+                if word in body:
+                    offenders.append(f"{name}: {word}")
+        self.assertEqual(offenders, [],
+                         "coded-stream structure belongs in the adapter (I4)")
+
+    def test_the_boundary_document_exists_and_is_linked(self):
+        root = os.path.dirname(self.PACKAGE)
+        doc = os.path.join(root, "docs", "boundary.md")
+        self.assertTrue(os.path.exists(doc))
+        text = open(doc).read()
+        for required in ("three-question test", "loan register",
+                         "I1", "I5", "compressor/decompressor",
+                         "transport facilitator"):
+            self.assertIn(required, text, f"boundary.md must state {required!r}")
+        for linker in ("README.md", "CLAUDE.md"):
+            with open(os.path.join(root, linker)) as fh:
+                self.assertIn("boundary.md", fh.read(),
+                              f"{linker} must link the boundary document")
+
+
+@needs_lmz
+class TestLoansRetire(unittest.TestCase):
+    """Each loan fails when lmz ships the interface that retires it.
+
+    A loan with no expiry is just a drift with an apology attached. These are
+    the expiries: when one fails, delete the loan and its entry in
+    `docs/boundary.md` rather than editing the test to pass.
+    """
+
+    def test_decode_chunk_loan_is_retired_and_the_adapter_uses_it(self):
+        """This loan is RETIRED. The test now guards the retirement instead.
+
+        It used to look for module-level names -- `decode_chunk`,
+        `decode_block`, `decode_unit` -- and lmz shipped the replacement as a
+        *method*, `ArchiveIndex.decode`. So the expiry test did not fire when
+        the thing it was watching for arrived, which is the exact failure the
+        loan register exists to prevent: the register outlived its reason and
+        nothing said so.
+
+        The lesson, kept because it generalises: an expiry test that guesses at
+        the *shape* of a future API only fires if the guess was right. Watch
+        for the capability, not the spelling -- and when it lands, invert the
+        test into one that keeps the adapter on the public path.
+        """
+        index = getattr(LMZ, "ArchiveIndex", None)
+        if index is None or not hasattr(index, "decode"):
+            self.skipTest("this lmz predates ArchiveIndex; the loan is live")
+        d = tempfile.mkdtemp()
+        try:
+            plain = make_model(d)
+            arc = os.path.join(d, "m.lmz")
+            LMZ.compress(plain, arc)
+            from lmsluice.archive import Archive
+
+            with Archive(arc) as a:
+                self.assertEqual(
+                    a.route, "public",
+                    "lmz publishes ArchiveIndex.decode, so the adapter must "
+                    "use it rather than reaching for api._chunk_decoder")
+        finally:
+            import shutil
+
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_device_decode_returns_plaintext_loan(self):
+        """Retired by a device entry point that returns plaintext (I2).
+
+        Asserts two things, because `Unit.opaque` exists only to serve this
+        loan: the interface has not arrived, *and* nothing outside
+        `devdecode.py` has started reaching through `opaque`. When this fires,
+        the kernel, its dispatch and `opaque` come out together -- leaving
+        `opaque` behind would keep the hole open after its reason had gone.
+        """
+        import os as _os
+
+        try:
+            from lmsluice._lmz import require
+
+            (gpu,) = require("gpu")
+        except Exception:                 # noqa: BLE001
+            self.skipTest("lmz.gpu not importable")
+        newer = [n for n in ("decode_chunks_dev", "decode_to_plaintext_dev",
+                             "decode_batch_plain_dev") if hasattr(gpu, n)]
+        self.assertEqual(
+            newer, [],
+            f"lmz.gpu now exposes {newer}: retire merge.cu, its dispatch in "
+            f"devdecode.py, AND Unit.opaque -- they share one cause")
+
+        pkg = TestBoundary.PACKAGE
+        reaches = []
+        for name in sorted(_os.listdir(pkg)):
+            # `codec.py` declares the field and `lmzcodec.py` is what puts
+            # the record in it -- for the adapter, reaching its own payload is
+            # definitional rather than a reach across the line. `devdecode.py`
+            # is the loan this field exists to serve. Everything else is a
+            # transport module and must not know the field exists.
+            if not name.endswith(".py") or name in (
+                    "devdecode.py", "codec.py", "lmzcodec.py",
+                    # A codec adapter owns the payload it puts in `opaque`;
+                    # reaching its own record is definitional, not a reach.
+                    "zstdcodec.py"):
+                continue
+            with open(_os.path.join(pkg, name)) as fh:
+                for line in fh:
+                    if ".opaque" in line and not line.strip().startswith("#"):
+                        reaches.append(f"{name}: {line.strip()}")
+        self.assertEqual(reaches, [],
+                         "Unit.opaque serves the merge loan only; it is not "
+                         "general interface")
+
+    def test_capability_declaration_loan(self):
+        """Retired by a per-archive decoder-capability declaration (I3).
+
+        `Capabilities.advice` expires with this too: it exists to tell a
+        writer which flag to set, and a declaring format makes that
+        unnecessary.
+        """
+        d = tempfile.mkdtemp()
+        try:
+            plain = make_model(d)
+            arc = os.path.join(d, "m.lmz")
+            LMZ.compress(plain, arc)
+            info = LMZ.info(arc)
+            manifest = info.get("manifest", {})
+            declared = [k for k in ("decoders", "capabilities", "readable_by")
+                        if k in manifest]
+            self.assertEqual(
+                declared, [],
+                f"lmz's manifest now declares {declared}: retire "
+                f"gpu_chunk_size() and read the declaration instead")
         finally:
             import shutil
 
