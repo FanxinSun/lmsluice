@@ -371,7 +371,10 @@ Stated plainly, because a page that lists only what works is not a description.
 - **One machine of evidence.** No WAN, no object storage, no cluster, no second
   GPU, no Apple silicon. Every number names its box for that reason.
 
-Where it stands against the alternatives, and what would change it, is in
+Where it stands against the alternatives is in
+[`docs/competition.md`](docs/competition.md) — six lanes of competing products,
+their published specs, and the three places the field has already taken ground
+this repository was counting on. What would change the plan is in
 [`docs/strategy.md`](docs/strategy.md).
 
 ## Status

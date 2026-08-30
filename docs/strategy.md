@@ -137,16 +137,27 @@ believe the number. **Lead with the router, not the pipeline.**
 
 ## 4b. Where this stands against what people already use
 
+**[`docs/competition.md`](competition.md) is the full survey** — six lanes,
+twenty-odd products, every number labelled with the machine its author took it
+on. The short form:
+
 | they use | for | how we compare |
 |---|---|---|
-| `safetensors` mmap | local loading, the incumbent | it wins on a fast NVMe and we say so. Not a fight worth having. |
-| CoreWeave `tensorizer`, run:ai model-streamer | object storage → GPU cold start | native code, S3-native, wired into vLLM. **This is our headline case and they own it.** |
-| `hf_transfer` | download acceleration | parallel ranges, no compression |
-| `zipnn` | model compression | lmz already beats it on ratio |
+| `safetensors` mmap, GGUF | local loading, the incumbent | it wins on a fast NVMe and we say so. Not a fight worth having. |
+| `fastsafetensors` + GPUDirect Storage | local loading with the CPU removed | 26.4 GB/s published. The gate against that is a 25× tax — and it needs an NVIDIA GPU, so it does not reach our machines |
+| CoreWeave `tensorizer`, Run:ai Model Streamer, SageMaker Fast Model Loader | object storage → GPU cold start | native code, S3-native, wired into vLLM. They own it — **and it is worth less than it looks**: model loading is 7–10% of vLLM startup on fast storage |
+| memory snapshots (Modal, Cerebrium) | the same cold start, without loading | the lane's endgame is no loader at all. A second reason not to fight there |
+| `hf_xet` (`hf_transfer` is deprecated) | download acceleration | **chunk-level dedup**, not just parallel ranges — it already takes part of the download win, and CDC dedup **conflicts** with shipping entropy-coded bytes. Unpriced |
+| `zipnn` | model compression | lmz leads on ratio by 1.1 points (34.7% vs 33.6%) against a 35.0% ceiling — real, and not a moat. ZipNN publishes **1.66 GB/s single-threaded** against our measured 0.39–0.48; not like-for-like, and worth measuring here |
+| `ZipLLM` (research) | hub-scale dedup + delta | 54.1% across 43 TB, because 99.64% of hub models are fine-tunes. This is our Phase 3, published first by someone else |
+| `DietGPU`, `nvCOMP` | GPU entropy decode | 250–600 GB/s and ~480 GB/s bracket lmz's 418. GPU decode is a commodity |
 
 **One thing we have that none of them do:** they all assume streaming or
 compression is better. We measure the machine and sometimes say no. That is a
-real differentiator and it is shipped.
+real differentiator and it is shipped — with one honest amendment, that
+filesystems have made a *ratio*-based version of this call for decades
+(ZFS/LZ4 early abort). Nobody makes the **rate** call, which is the one that
+can say *"your archive costs you 6× on load time"*.
 
 **Distance to someone actually using it**, honestly:
 
