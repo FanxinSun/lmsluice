@@ -51,6 +51,19 @@ with no I/O in it. It is not a crossover and this page does not use it as one:
 the crossover is 5.95, measured through the transport that actually does the
 work.
 
+**A second correction, still settling.** The destination buffer a load decodes
+into cost more than the transport that filled it: `bytearray(n)` zero-fills,
+which faults every page eagerly and writes a full pass of zeroes the decoder
+immediately overwrites — 0.55 s against 0.31 s of transport on a 1.87 GB
+checkpoint. It is now a private anonymous mapping advised for huge pages, which
+is 4.5× cheaper and needs nothing installed. **The end-to-end figures on this
+page predate that change and are pessimistic by up to ~2× on this box.** They
+are left as they are rather than restated, because the replacements have only
+been taken page-cache-warm and this page's numbers are cold-protocol ones; the
+two are not interchangeable and quoting across them is how the 6× above
+happened. No gate verdict moves either way — both routes paid the allocation
+equally. `MEASURED.md` has the fault counts and the arithmetic.
+
 **Measured, not asserted** — a 1 GiB BF16 model over a 9p mount, cache dropped
 before every run, byte-identical. That mount is one sample of the sub-1-GB/s
 class and not a target; the finding is the link rate, not the filesystem:
@@ -160,31 +173,72 @@ gave, which used the conditioned codec's rate. All projections:
 So the same code and the same archive reach opposite verdicts, decided
 entirely by the machine in front of them. A laptop with a SATA SSD gets the
 whole of lmz's ratio as load speed with nothing but the CPU; the desktop this
-was written on pays six times over for it. Neither is *the* answer, which is
-the reason the decision is made at run time and not written down here.
+was written on pays a modest tax for it — **0.74×**, not the 6× this page used
+to claim. Neither is *the* answer, which is the reason the decision is made at
+run time and not written down here.
 
 Move the decoder instead of the disk and it flips again:
 
-| decoder | GB/s | against 6.34 GB/s NVMe |
+| decoder | GB/s | basis | against 6.34 GB/s NVMe |
+|---|---|---|---|
+| lmz CPU, 16 threads | 8.3 | decode only, from RAM | 1.31× |
+| lmz CPU, through this transport | 5.95 | end to end | 0.94× |
+| lmz CUDA, per-chunk table, RTX 5080 | 111 | decode only | free; 1.49× by the ratio |
+| lmz CUDA, shared table, RTX 5080 | 418 | decode only | free; 1.49× by the ratio |
+| a 2-CU display iGPU, **predicted** | **≤ 7.8** | `gate.py`, projection | ≤ 1.23×, and no floor |
+
+### The last row used to be an interval this page could not narrow
+
+It said 4 – 36 GB/s, because the decoder's compute cost per byte was known from
+**one** point on **one** card, and one point fits a compute-bound and a
+bandwidth-bound reading equally well. The two agreed on the RTX 5080 that
+produced them and differed 8× on a 2-CU integrated GPU — the class this project
+exists for. `gate.py` carried both readings and refused to pick.
+
+**lmz 1.3.0 separated them, and not by one reading being wrong.** Both are true,
+and *which one binds is a property of the device*. The separation came from
+measuring `k` across a grid sweep rather than at a single launch: a sweep across
+residency is precisely what tells a latency-bound cost from a bandwidth ceiling,
+because the two predict different slopes as blocks are added. `k` also moved,
+230–330 → 217–248 lane-cycles per decoded byte, and the direction matters more
+than the size — the old interval was fitted where **bandwidth was binding**,
+which is the regime that cannot tell the two apart. The new one comes from the
+rows below saturation, which is the regime a small device actually runs in.
+
+So the gate picks now, on the codec's published grounds rather than on our
+inference:
+
+| device | binding term | margin |
 |---|---|---|
-| lmz CPU, this box, measured | 1.05 | 0.17× |
-| lmz CUDA, per-chunk table, RTX 5080 | 111 | free; 1.49× by the ratio |
-| lmz CUDA, shared table, RTX 5080 | 418 | free; 1.49× by the ratio |
-| a 2-CU display iGPU, **predicted** | 4 – 36 | pays at the floor of the interval |
+| RTX 5080 | **bandwidth** | 3.3× below its own compute ceiling |
+| 2-CU iGPU | **compute** | 3.3× below its own bandwidth ceiling |
 
-That last row is `gate.py`'s job rather than this package's, and the
-interval is the honest state of it: the decoder's compute cost per byte is
-known from **one** point on **one** card, and that point fits a
-compute-bound and a bandwidth-bound reading equally well. The two readings
-agree on the RTX 5080 that produced them and differ by 8× on a 2-CU
-integrated GPU — which is the class this project exists for. `gate.py` carries
-both and refuses to pick; this package measures instead of predicting, and the
-two are asserted to state the same identity in the test suite.
+On a small integrated part the bandwidth reading is simply not live. That is
+what collapsed the 8×.
 
-**What survives the pessimistic reading** is the founding claim: even at the
-floor of the interval, the smallest integrated GPU AMD ships decodes about 2×
-faster than the CPU decoder, on a device that is a display adapter rather than
-an APU. What does not survive is reading any one desktop's NVMe as *the* disk.
+### What is still not known, stated as plainly as the old refusal was
+
+**A tighter interval is not a measurement.** Everything above was measured on an
+RTX 5080. **Nobody has run a 2-CU device.** The row stays a projection, it stays
+one-sided — `≤ 7.8` with no floor, because that device's occupancy is assumed
+rather than read — and two things stay genuinely unverified:
+
+1. **Whether decode stays linear in resident lanes down to 2 CUs**, or meets a
+   cache, scheduler or driver wall first. The linearity holds over an 84× range,
+   but all of it on one card and none of it near this size.
+2. **How a unified-memory part behaves with the CPU contending for the same
+   bus.** Every bandwidth figure here assumes the decoder has the memory system
+   to itself, which on an integrated GPU it does not.
+
+And the founding caveat survives the narrowing unchanged. The lanes above assume
+the adapter holds four blocks per unit; Vulkan reports only a per-workgroup
+shared-memory cap, not the per-unit pool occupancy needs. **At one block per unit
+the row becomes 1.7 – 1.9 GB/s, below the CPU decoder.** The plausible range for
+this device still spans the CPU decoder, and nothing here establishes that the
+iGPU wins. That is a question for the measurement, not for the wording.
+
+What does not survive, either way, is reading any one desktop's NVMe as *the*
+disk.
 
 ## Into VRAM
 
@@ -367,6 +421,27 @@ interface in `codec.py`, and a test walks the package source to keep it that
 way. Three decode paths are probed in order and `Archive.route` names the live
 one, so a benchmark can never quietly measure a fallback: `public` on a current
 lmz, `direct` on one that predates `ArchiveIndex`, `mapped` on any lmz at all.
+Since lmz 1.3.0 reached PyPI, **`pip install lmzip` gives the `public` path** —
+it is no longer something you get only from a branch. The three-route probe
+stays: a 1.2.0 consumer still exists, and a package that silently measured a
+fallback would be worse than one that fails.
+
+**The cost model is now read rather than restated, and that closed a real gap.**
+`gate.py` used to hold lmz's expansion ratio, its sustained fraction of peak
+DRAM, and its kernel's shared-memory shape as literals, because lmz published
+the last of those only as prose in a provenance string. They are fields now, so
+`CodecCost` carries them and the curve reads them. Those literals were correct
+the day they were written, which is exactly the problem: a copied constant stays
+right until it silently is not.
+
+**The per-group table is the clearest thing the boundary has produced.** This
+package's shared-memory finding and lmz's own kernel analysis arrived at the
+same lever from opposite ends, and it is now priced in published fields: at the
+same 192-thread block, the shared-table kernel's **640 bytes per group** fits
+**7 blocks per SM**, where the per-chunk kernel's **5,760** fits **1**. A 9×
+difference in one field, and the residency it buys is most of the gap between
+418 GB/s and 111. Neither side had to tell the other a number to get there —
+one published a shape, the other read it.
 
 **What is still on loan is `merge.cu`** — a CUDA byte-plane transpose that is
 lmz's work held here, because the device decoder returns plane-major bytes
