@@ -54,16 +54,73 @@ class Source:
 
 
 class FileSource(Source):
-    """A local file. `pread` is thread-safe and needs no lock, which is why
-    the fetch stage can run as many threads as the device has depth for."""
+    """A local file, read concurrently at arbitrary offsets.
+
+    `os.pread` is the whole implementation on POSIX: it takes the offset as an
+    argument, so any number of threads can read any number of places at once
+    with no lock and no shared cursor. That property is what lets the fetch
+    stage run at the device's queue depth.
+
+    **Windows has no `os.pread`**, and this package assumed it did -- so every
+    read failed there with `AttributeError`, which is a more thorough kind of
+    broken than the cold-measurement bug this was found next to. The fix has to
+    keep the concurrency, so it is not a lock around seek-then-read: that would
+    serialise the fetch stage and quietly turn queue depth into one. Instead
+    each thread gets its own descriptor and therefore its own file position,
+    which is the same independence `pread` gives, bought with a handle per
+    thread instead of none.
+    """
+
+    _HAS_PREAD = hasattr(os, "pread")
 
     def __init__(self, path: str):
         self.name = path
-        self._fd = os.open(path, os.O_RDONLY)
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        self._flags = flags
+        self._fd = os.open(path, flags)
         self.size = os.fstat(self._fd).st_size
+        self._local = threading.local()
+        self._extra: list[int] = []
+        self._extra_lock = threading.Lock()
+        self._primary_taken = False
+
+    def _thread_fd(self) -> int:
+        """This thread's own descriptor, opened on first use.
+
+        The claim on the constructor's descriptor is made under the lock and
+        exactly once. An earlier version tested `not self._extra` outside it,
+        so several threads starting together all saw an empty list and all
+        took the same descriptor -- which reintroduces the shared file position
+        this exists to avoid, and only under concurrency, which is the only
+        time it matters.
+        """
+        fd = getattr(self._local, "fd", None)
+        if fd is not None:
+            return fd
+        with self._extra_lock:
+            if not self._primary_taken:
+                self._primary_taken = True
+                fd = self._fd
+            else:
+                fd = os.open(self.name, self._flags)
+                self._extra.append(fd)
+        self._local.fd = fd
+        return fd
 
     def pread(self, offset: int, length: int) -> bytes:
-        data = os.pread(self._fd, length, offset)
+        if self._HAS_PREAD:
+            data = os.pread(self._fd, length, offset)
+        else:
+            fd = self._thread_fd()
+            os.lseek(fd, offset, os.SEEK_SET)
+            chunks, left = [], length
+            while left:
+                b = os.read(fd, left)
+                if not b:
+                    break
+                chunks.append(b)
+                left -= len(b)
+            data = chunks[0] if len(chunks) == 1 else b"".join(chunks)
         if len(data) != length:
             raise EOFError(f"{self.name}: wanted {length} at {offset}, "
                            f"got {len(data)}")
@@ -72,37 +129,101 @@ class FileSource(Source):
     def fileno(self) -> int:
         return self._fd
 
-    def uncache(self, offset: int = 0, length: int = 0) -> str:
+    def pread_into(self, buf, offset: int) -> int:
+        """Read len(buf) bytes at `offset` straight into a writable buffer.
+
+        `pread` has to allocate and return `bytes`, which is read-only -- and a
+        read-only buffer cannot have its address taken, so anything that wants
+        to hand those bytes to a device driver has to copy them first. On a
+        route whose whole argument is that it moves fewer bytes, an extra
+        gigabyte through the interpreter is not a detail: it was half the cost
+        of the device path.
+
+        `preadv` writes into memory the caller owns and keeps the offset
+        argument, so it stays lock-free like `pread`. Where it is absent the
+        per-thread descriptor of the no-`pread` path serves the same purpose.
+        """
+        view = memoryview(buf).cast("B")
+        preadv = getattr(os, "preadv", None)
+        if preadv is not None:
+            got, pos = 0, offset
+            while got < len(view):
+                n = preadv(self._fd, [view[got:]], pos)
+                if not n:
+                    break
+                got += n
+                pos += n
+            return got
+        fd = self._thread_fd()
+        os.lseek(fd, offset, os.SEEK_SET)
+        got = 0
+        while got < len(view):
+            n = os.readinto(fd, view[got:]) if hasattr(os, "readinto") else 0
+            if not n:
+                chunk = os.read(fd, len(view) - got)
+                if not chunk:
+                    break
+                view[got:got + len(chunk)] = chunk
+                n = len(chunk)
+            got += n
+        return got
+
+    def uncache(self, offset: int = 0, length: int = 0) -> tuple[bool, str]:
         """Best effort: forget what the OS cached about this file.
 
-        Returns how it was done, or why it was not. This is the only honest
-        way to measure a cold read, and it is not available everywhere: Linux
-        can drop a range from the page cache, macOS can ask that an fd bypass
-        it, and Windows offers neither to a Python process. Where it is not
-        available the caller must say the number is warm rather than quietly
-        report it as cold.
+        Returns `(succeeded, how)`. Both halves matter and the first one is
+        why this is a tuple: the previous version returned a single string and
+        put the failure reason in it, so a failure -- `"posix_fadvise failed:
+        ..."` -- was a truthy value that every caller read as success. A cold
+        rate was then recorded from a warm read, silently, on any filesystem
+        where the call is refused. tmpfs is one, so this was never a
+        Windows-only problem.
+
+        Not available everywhere: Linux drops a range from the page cache,
+        macOS asks that an fd bypass it, and Windows offers a Python process
+        neither -- there, `direct_pread` reads past the cache instead. Where
+        none of them works the caller must report the number as warm rather
+        than pass it off as cold.
         """
         fadvise = getattr(os, "posix_fadvise", None)
         if fadvise is not None:
             try:
                 fadvise(self._fd, offset, length, os.POSIX_FADV_DONTNEED)
-                return "posix_fadvise(DONTNEED)"
+                return True, "posix_fadvise(DONTNEED)"
             except OSError as exc:
-                return f"posix_fadvise failed: {exc}"
+                return False, f"posix_fadvise refused: {exc}"
         try:                              # macOS: read past the cache instead
             import fcntl
 
             F_NOCACHE = 48
             fcntl.fcntl(self._fd, F_NOCACHE, 1)
-            return "fcntl(F_NOCACHE)"
-        except (ImportError, OSError, ValueError):
-            pass
-        return ""
+            return True, "fcntl(F_NOCACHE)"
+        except (ImportError, OSError, ValueError) as exc:
+            return False, f"F_NOCACHE unavailable: {exc}"
+
+    def direct_reader(self):
+        """An unbuffered reader for cold measurement, or None.
+
+        Windows only, and measurement only. Everywhere else the cache is
+        dropped instead, and on every platform ordinary `pread` stays
+        buffered -- a loader wants the page cache, it is only the probe that
+        has to see past it.
+        """
+        from . import _win
+
+        return _win.open_direct(self.name)
 
     def close(self) -> None:
         if self._fd >= 0:
             os.close(self._fd)
             self._fd = -1
+        with self._extra_lock:
+            for fd in self._extra:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self._extra = []
 
 
 class HttpSource(Source):
