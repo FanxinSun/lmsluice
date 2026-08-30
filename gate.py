@@ -1,8 +1,8 @@
 """Can this machine decode faster than its disk?
 
-The whole of `load/` rests on one comparison, and the point of putting it in
-a file is that it has to be evaluated on *someone else's* machine, not on the
-one it was calibrated on. Nothing here is specific to the box in MEASURED.md
+The whole of `lmsluice/` rests on one comparison, and the point of putting it
+in a file is that it has to be evaluated on *someone else's* machine, not on
+the one it was calibrated on. Nothing here is specific to the box in MEASURED.md
 except the rows marked as measured there.
 
     load time, plain file      =  N / disk

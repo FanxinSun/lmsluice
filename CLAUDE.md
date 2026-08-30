@@ -1,8 +1,8 @@
-# load — standing rule for every agent working here
+# lmsluice — standing rule for every agent working here
 
 *The parent repository's `CLAUDE.md` (one level up, if you have it) carries
 this in full, plus the environment, network and scope rules. This copy
-exists because `load/` is a repository of its own.*
+exists because `lmsluice/` is a repository of its own.*
 
 ## This PC is the instrument, not the target — and here it is the whole point
 
