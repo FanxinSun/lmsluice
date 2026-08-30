@@ -34,18 +34,22 @@ degree: 0.74× where the arithmetic says 0.95×, so about 20% is unaccounted and
 is being chased.
 
 So the value is very nearly a function of one variable: **how slow the link
-is.** Measured at 16 threads with lmz's field-split codec, the crossover sits
-around **8.3 GB/s of storage** — above almost everything anyone reads a model
-from, which is why the verdict is "pays" nearly everywhere and break-even on a
-warm local NVMe.
+is** — and every link below the crossover above is one where compression is
+free or better.
 
 **A correction, because this page used to say otherwise.** It claimed an archive
 "costs you 6× on load time" on a fast NVMe. That figure paired the fastest plain
 measurement with the slowest coded one, and the coded one used a chunk size that
 reaches lmz's conditioned codec — which decodes **6.1× slower** than its field
 split on the same data. With the chunk size this package now writes, the same
-machine measures **0.94× — break-even**, and still saves 33% of the disk.
-`MEASURED.md` has both numbers and the comparison that was wrong.
+machine measures **0.74×**: still a tax on a warm local NVMe, but a modest one,
+and it still saves 33% of the disk. `MEASURED.md` has both numbers and the
+comparison that was wrong.
+
+Note that 8.3 GB/s appears in `MEASURED.md` as the decoder's rate **from RAM**,
+with no I/O in it. It is not a crossover and this page does not use it as one:
+the crossover is 5.95, measured through the transport that actually does the
+work.
 
 **Measured, not asserted** — a 1 GiB BF16 model over a 9p mount, cache dropped
 before every run, byte-identical. That mount is one sample of the sub-1-GB/s
