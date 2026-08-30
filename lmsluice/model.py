@@ -86,10 +86,12 @@ def _gb(rate) -> str:
 class Model:
     """A safetensors model, opened over whichever route is faster."""
 
+    from_cache = False
+
     def __init__(self, target: str, *, profile: Profile | None = None,
                  prefer: str | None = None, member: str | None = None,
                  fetch_threads: int | None = None,
-                 place_threads: int | None = None):
+                 place_threads: int | None = None, cache: str = "auto"):
         self.target = target
         self.route = "plain"
         self._arc: Archive | None = None
@@ -100,7 +102,19 @@ class Model:
         self._place_threads = place_threads or p
 
         src = open_source(target)
-        coded = src.pread(0, 4) == b"LMZ\x01" if src.size >= 4 else False
+        coded = _is_coded(src)
+        if not coded and cache != "off" and isinstance(src, FileSource):
+            # An existing cache entry is used without being asked; building one
+            # is never automatic. See `cache.py` for why that asymmetry.
+            from . import cache as _cache
+
+            hit = _cache.find(target)
+            if hit:
+                src.close()
+                target, self.target = hit, hit
+                src = open_source(hit)
+                coded = _is_coded(src)
+                self.from_cache = True
         if coded:
             src.close()
             self._arc = Archive(target)
@@ -218,6 +232,160 @@ class Model:
                 yield name, view[t.start - base:t.end - base]
             del view, buf
 
+    # Plain bytes staged through one pinned window. Two of these exist at a
+    # time so a copy can overlap the next fill, and the size is a parameter
+    # because the right value is a property of the machine: enough to keep the
+    # link busy, small enough that page-locking it is not itself the problem.
+    WINDOW = 128 << 20
+
+    def to_device(self, names=None, *, context=None, window: int | None = None,
+                  route: str | None = None):
+        """Fill a CUDA allocation with the model, and hand it back.
+
+        Returns a `cuda.DeviceBuffer`, which carries `__cuda_array_interface__`
+        -- so `torch.as_tensor(buf, device="cuda")` and `cupy.asarray(buf)`
+        adopt the memory with no copy, and lmsluice imports neither.
+
+        Windows are cut at block boundaries on the coded route rather than at
+        round numbers. A block straddling a window edge would otherwise be
+        decoded twice, once for each side, and paying an eighth of the decode
+        again to keep the arithmetic tidy is the wrong trade.
+        """
+        from . import cuda
+
+        ok, why = cuda.available()
+        if not ok:
+            raise RuntimeError(f"no CUDA device: {why}")
+        ctx = context or cuda.Context()
+        own_ctx = context is None
+        window = window or self.WINDOW
+        chosen = route or ("device" if self.route == "coded" else "plain")
+
+        if chosen == "device" and self.route == "coded":
+            # Coded bytes cross PCIe and are turned into plaintext where they
+            # land. Falls back rather than fails: a machine with no nvcc, or an
+            # archive whose codec the kernel cannot read, still gets its model.
+            from . import devdecode
+
+            dd = devdecode.for_context(ctx)
+            chunks = (self._arc.chunks_for(spans_for_device(self, names))
+                      if dd.available else [])
+            takeable = [c for c in chunks if not dd.takes(c)]
+            if dd.available and takeable:
+                dev = ctx.allocate(self.plain_bytes)
+                try:
+                    with ctx.stream() as stream:
+                        self.device_stats = dd.decode(self._arc, chunks, dev,
+                                                      self._base, stream)
+                    self.device_route = "device"
+                    return dev
+                except BaseException:
+                    dev.close()
+                    if own_ctx:
+                        ctx.close()
+                    raise
+            # Nothing the device can take. Falling through to the host route
+            # rather than limping through the device path's per-chunk host
+            # fallback, which decodes one chunk at a time with a synchronous
+            # copy after each and measured slower than the route it was
+            # standing in for.
+            if not dd.available:
+                self.device_why = dd.why
+            elif chunks:
+                self.device_why = dd.takes(chunks[len(chunks) // 2])
+            chosen = "coded-host"
+
+        spans = ([(self._base, self._end)] if names is None
+                 else self.span_of(names))
+        dev = ctx.allocate(self.plain_bytes)
+        try:
+            windows = self._device_windows(spans, window)
+            size = max((hi - lo) for lo, hi in windows) if windows else window
+            pins = [ctx.pinned(size), ctx.pinned(size)]
+            stream = ctx.stream()
+            try:
+                for i, (lo, hi) in enumerate(windows):
+                    pin = pins[i % len(pins)]
+                    # Before reusing a staging buffer, wait for the copy that
+                    # last read it. The stream is FIFO, so synchronising it
+                    # covers that copy and every earlier one.
+                    #
+                    # This was wrong and the bug was silent: the guard used to
+                    # compare against the *most recent* buffer, which with two
+                    # alternating buffers is never the one about to be reused,
+                    # so it never fired. Each window was written into a buffer
+                    # whose DMA might still be in flight, and whether that
+                    # corrupted the load depended on whether reading and
+                    # decoding the next window took longer than the copy --
+                    # so it passed almost always and failed under load.
+                    if i >= len(pins):
+                        stream.synchronize()
+                    view = pin.view()[:hi - lo]
+                    # The window's own spans, not the whole request: `_gather`
+                    # fills everything it is given, and handing it the full
+                    # span list would try to write the entire model into one
+                    # staging buffer.
+                    self._gather(_clip(spans, lo, hi), into=view, base=lo,
+                                 limit=(lo, hi))
+                    dev.copy_from(pin, offset=lo - self._base, stream=stream,
+                                  nbytes=hi - lo)
+                stream.synchronize()
+            finally:
+                stream.close()
+                for p in pins:
+                    p.close()
+            self.device_route = chosen
+            return dev
+        except BaseException:
+            dev.close()
+            if own_ctx:
+                ctx.close()
+            raise
+
+    device_stats = None
+    device_why = ""
+
+    def device_plan(self):
+        """Price the three routes into VRAM, from the measured profile.
+
+        A comparison rather than a switch. `to_device` moves whichever form the
+        caller opened, because the plain file and the archive are two files and
+        choosing between them is the caller's -- what this does is say which
+        one they should have opened, with the arithmetic attached.
+        """
+        from .plan import vram_plan
+
+        st = (self.profile.storage.get(storage_key(self.target))
+              if self.profile and self._is_local() else None)
+        link = self.profile.storage.get("pcie") if self.profile else None
+        codec = self.profile.codecs.get("lmz-cpu") if self.profile else None
+        ratio = codec.ratio if codec else None
+        coded = (self.coded_bytes if self.route == "coded"
+                 else (int(self.plain_bytes * ratio) if ratio else None))
+        return vram_plan(self.plain_bytes, coded,
+                         source=st.source if st else None,
+                         pcie=link.cold if link else None,
+                         host_decode=codec.decode if codec else None,
+                         device_decode=None)
+
+    def _device_windows(self, spans, window: int):
+        """Cut `spans` into staging windows, on block boundaries where they
+        exist, so no block is decoded twice."""
+        lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+        if self.route != "coded":
+            return [(a, min(a + window, hi))
+                    for a in range(lo, hi, window)] or [(lo, hi)]
+        edges = [c.dst + c.rlen for c in self._arc.chunks_for([(lo, hi)])]
+        edges = sorted({e for e in edges if lo < e < hi}) + [hi]
+        out, start = [], lo
+        for e in edges:
+            if e - start >= window or e == hi:
+                out.append((start, e))
+                start = e
+        if start < hi:
+            out.append((start, hi))
+        return out
+
     def tensor(self, name: str, buffer=None) -> memoryview:
         """One tensor. Reads only the blocks that hold it."""
         t = self.tensors[name]
@@ -303,6 +471,15 @@ class Model:
         source = st.source if st else None
         decode = codec.decode if codec else None
         note = ""
+        if st is not None and st.source is None and st.warm_bound:
+            # The coded route is unevaluated here, not beaten. Saying which
+            # matters: a reader who sees "plain wins" on a machine that could
+            # not measure its own disk will believe a verdict nobody reached.
+            note = (f"  note: this platform could not measure a cold read "
+                    f"({st.method}). The warm rate was "
+                    f"{st.warm_bound / 1e9:.2f} GB/s, which is a cache rate "
+                    f"and only an upper bound on the link, so the coded route "
+                    f"is unevaluated rather than beaten")
         if st and st.layered:
             note = ("  note: a cache below this process serves repeat reads, "
                     "so the cold rate holds on first touch only")
@@ -359,6 +536,22 @@ def open_model(target: str, **kw) -> Model:
     return Model(target, **kw)
 
 
+def spans_for_device(model, names):
+    """The plain ranges a device load must cover."""
+    return ([(model._base, model._end)] if names is None
+            else model.span_of(names))
+
+
+def _clip(spans, lo: int, hi: int):
+    """The parts of `spans` inside [lo, hi), dropping what falls outside."""
+    out = []
+    for a, b in spans:
+        a, b = max(a, lo), min(b, hi)
+        if a < b:
+            out.append((a, b))
+    return out
+
+
 def _windows(order, tensors, budget: int):
     """Group tensors into runs whose byte span fits the budget."""
     group, lo, hi = [], None, None
@@ -373,6 +566,14 @@ def _windows(order, tensors, budget: int):
         hi = max(hi, t.end)
     if group:
         yield group
+
+
+def _is_coded(src) -> bool:
+    """Whether this source is a coded archive of any codec we know."""
+    if src.size < 8:
+        return False
+    head = src.pread(0, 8)
+    return head[:4] == b"LMZ\x01" or head == b"LMSLUICE"
 
 
 def _safetensors_index(src, member: str) -> dict:
