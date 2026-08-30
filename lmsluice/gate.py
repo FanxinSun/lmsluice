@@ -318,6 +318,24 @@ class Device:
                                  self.shmem_cap_per_block,
                                  self.max_threads_per_unit)
 
+    def residency_binds(self, c: Constants) -> str | None:
+        """Which of the two residency limits is the binding one, or None.
+
+        Worth reporting for the same reason `transport.Report.limited_by` is:
+        the answer differs between devices, and a model that only prints the
+        result cannot be checked against a machine nobody here owns. It also
+        makes a live hazard visible -- the shared-memory term is large mainly
+        because of a fixed 16 KiB lookup table, so narrowing that table (which
+        both this package and lmz have been pointing at) shrinks exactly the
+        margin by which shared memory currently wins, and the thread term
+        starts to bind on parts where it never has.
+        """
+        if (not self.shmem_pool_per_unit or not self.max_threads_per_unit):
+            return None
+        shm = self.shmem_pool_per_unit // c.shmem_per_block()
+        thr = self.max_threads_per_unit // c.block_threads
+        return "shared memory" if shm <= thr else "threads per unit"
+
     def resident_lanes(self, c: Constants) -> int | None:
         """Lanes resident across the device, from its own shared-memory budget.
 
@@ -518,6 +536,9 @@ def _table(codec_cost=None) -> None:
         comp = d.compute_bound(c)
         bw = d.bandwidth_bound(c)
         lo, hi, why = d.predict(c)
+        binds = d.residency_binds(c)
+        if binds:
+            why = f"{why} [residency: {binds}]"
         cs = "  unknown" if comp is None else f"{comp[0]:.0f} - {comp[1]:.0f}"
         band = (f"<= {hi:.1f}" if lo <= 0.0
                 else (f"{lo:.1f} - {hi:.1f}" if hi - lo > 0.05 else f"{hi:.1f}"))

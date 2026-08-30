@@ -1608,6 +1608,38 @@ class TestGateModel(unittest.TestCase):
         # A generous cap does not add residency; only the pool does.
         self.assertEqual(c.blocks_per_unit(shm, shm * 100, 4096), 1)
 
+    def test_residency_takes_the_smaller_of_two_limits(self):
+        """A unit caps resident threads as well as shared memory.
+
+        lmz's published formula carried only the shared-memory term, which held
+        on its card because shared memory binds there at every block size. It
+        holds on ours too -- but "it does not bind on the devices we have
+        looked at" is the reasoning that produced several wrong numbers here,
+        and this model projects onto parts nobody owns.
+
+        The hazard is live rather than hypothetical: the shared-memory term is
+        large mostly because of a fixed 16 KiB lookup table, so narrowing that
+        table shrinks the very margin by which it currently wins.
+        """
+        c = self.gate.cost_from(None)
+        shm = c.shmem_per_block()
+
+        # A pool with room for sixteen, a thread budget with room for one.
+        self.assertEqual(
+            c.blocks_per_unit(shm * 16, shm * 16, c.block_threads), 1,
+            "the threads-per-unit limit is not being applied")
+        # And the reverse, so the min() is genuinely a min and not a swap.
+        self.assertEqual(
+            c.blocks_per_unit(shm, shm, c.block_threads * 16), 1)
+
+        for d in self.gate.DEVICES:
+            binds = d.residency_binds(c)
+            if binds is not None:
+                self.assertEqual(binds, "shared memory",
+                                 f"{d.name}: the binding residency term has "
+                                 f"changed; every row derived from it needs "
+                                 f"rechecking")
+
     def test_a_device_with_no_pool_gets_no_compute_term(self):
         """An unobtained pool is not a small pool and must not collapse to one.
 
