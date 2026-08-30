@@ -74,12 +74,31 @@ laptop or a 9p mount.
    with them, which is worth saying out loud — **the gate predicts the market's
    behaviour**, and the market is sitting on the tax side of it.
 3. **The prize is smaller than it looks.** The 2026 cold-start study of vLLM
-   (H100 + EPYC 9354; a node with 4× PCIe 5.0 SSDs at 25 GB/s) finds that
-   **model loading is 7–10% of vLLM startup**, that going from warm DRAM to
-   SSD slows loading by 0.5× but total startup by only **1.04×**, and that
-   `torch.compile` graph storage costs **11–21 s** uncached against 3–6 s
-   cached. A perfect loader in this lane wins a few percent of a number
-   dominated by compilation.
+   (Kabakibo, Trivedi & Wang, arXiv 2606.07362) finds, all in **§3.3 "Impact of
+   SSDs"**, that **model loading is 7–10% of total startup**, that flushing the
+   buffer cache so reads come from SSD rather than warm DRAM slows the loading
+   step by **0.5×** while total startup changes by only **1.04×** (their
+   Figure 13, averaged across models and normalised to the DRAM baseline).
+   Separately,
+   **§3.5 with Figure 15** gives `torch.compile` graph storage at **11–21 s**
+   uncached against **3–6 s** cached (the cached figure is Figure 6). A perfect
+   loader in this lane wins a few percent of a number dominated by compilation.
+
+   *Testbed, verified:* the SSD experiment runs on the paper's node **n3 — Intel
+   Xeon Platinum 8568Y+ with an H100** — over an **LVM volume mirroring four
+   PCIe 5.0 SSDs, 25 GB/s read and 15 GB/s write by `fio`** for large transfers,
+   verbatim *"the first ten models listed in Table 1, each repeated five times"*.
+   An earlier version of this paragraph attributed it to node n1's EPYC 9354,
+   which is the paper's *main* node and not the one the storage experiment used.
+
+   *One figure deliberately not cited:* the paper's **Figure 14** compares three
+   loading backends across Llama2-13B, Yi-6B, Llama2-7B and Falcon-7B, and its
+   textual claim is that Tensorizer is consistently lowest. Its twelve bar values
+   are **not recoverable from the PDF** — glyph extraction returns a different
+   subset of them depending on the grouping tolerance used (eight values at one
+   setting, seven overlapping-but-different at another), so any (model, backend)
+   attribution would be an artefact of the extraction rather than a reading of
+   the paper. Nothing in this document rests on it.
 
 `strategy.md` says of this lane: *"this is our headline case and they own
 it."* The evidence supports the second half and undercuts the first — it should
@@ -334,7 +353,8 @@ Five conclusions, in the order they should affect `strategy.md`:
 
 1. **Keep the decision to skip lane B, and strengthen the reason.** It is not
    just that Run:ai and tensorizer are ahead. It is that model loading is
-   7–10% of vLLM startup on fast storage, and that the lane's endgame is
+   7–10% of vLLM startup on fast storage (2606.07362 §3.3), and that the lane's
+   endgame is
    memory snapshots, which remove the loader entirely.
 2. **`hf_transfer` is the wrong opponent; `hf_xet` is the right one.** The
    comparison row should be rewritten: HF now ships CDC dedup by default, it
