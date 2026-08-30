@@ -72,3 +72,44 @@ A Linux and macOS equivalent. The same three measurements through Vulkan
 compute would cover both, and would share the shape of the eventual decoder
 backend — which is an argument for writing it after that backend rather than
 before it.
+
+## Determining the shared-memory pool empirically — feasible, and how — 2026-08-30
+
+`gate.py`'s largest open parameter is the 2-CU adapter's shared-memory **pool per
+compute unit**. It decides whether the smallest integrated GPU AMD ships beats
+the CPU decoder, and it is **exposed by no interface that adapter offers**: core
+Vulkan has no such query, and `VK_AMD_shader_core_properties` and
+`shader_core_properties2` — both present on the device, both queried — carry no
+LDS field.
+
+**It is nonetheless measurable here, with no downloads and no SDK**, because
+`igpu-bench.ps1` already has every piece: a D3D11 device on a chosen adapter, the
+runtime HLSL compiler in `d3dcompiler_47.dll`, buffers, UAVs, dispatch and
+timing. All of it ships with Windows, which is the same constraint that made the
+existing probe worth writing.
+
+**The method.** A compute shader declaring `groupshared` memory the size of the
+decoder's request, at the decoder's group size, doing enough work per group to
+dominate dispatch overhead. Then sweep the *number of groups dispatched*: if `C`
+groups are resident at once, elapsed time rises as `ceil(G / C)`, so the
+staircase in time-against-`G` gives `C` directly. Divide by the adapter's
+**2 compute units**, queried, and the pool follows as at least
+`blocks_per_CU × 31,744`.
+
+That is lmz's own grid-sweep method pointed at occupancy instead of throughput,
+which is a reason to trust the shape of it.
+
+**It must be calibrated on the RTX 5080 first, and that is not optional.** That
+device's occupancy is independently known — lmz measured 3–4 blocks per unit, and
+`gate.py` derives 3 from queried `sharedMemPerMultiprocessor`. A method that
+cannot recover 3 there has not earned an answer on a device where nothing can
+check it. Calibrate, then measure.
+
+**What it cannot settle.** D3D11 caps `groupshared` at 32 KiB per group, so this
+can find the pool but cannot test whether the adapter's *opt-in* cap exceeds the
+32,768 Vulkan reports. The second of `gate.py`'s two conservatisms therefore
+survives this measurement, and the floor stays a floor.
+
+**Cost:** hours, in the existing script's style — not a backend port. Which is
+the point: the parameter that decides the founding claim may be obtainable
+without one.
