@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 from . import plan as _plan
 from .archive import Archive, Tensor
+from .buffer import destination
 from .probe import default_threads
 from .rates import Profile, storage_key
 from .source import FileSource, open_source
@@ -199,7 +200,7 @@ class Model:
         """
         spans = ([(self._base, self._end)] if names is None
                  else self.span_of(names))
-        buf = into if into is not None else bytearray(self.plain_bytes)
+        buf = into if into is not None else destination(self.plain_bytes)
         if len(buf) < self.plain_bytes:
             raise ValueError(f"buffer holds {len(buf)}, member needs "
                              f"{self.plain_bytes}")
@@ -400,7 +401,7 @@ class Model:
         """Write the member out plain. Named `expand`, and priced, in the plan."""
         if os.path.exists(path) and not overwrite:
             raise FileExistsError(path)
-        buf = bytearray(self.plain_bytes)
+        buf = destination(self.plain_bytes)
         self._gather([(self._base, self._end)], into=buf, base=self._base,
                      limit=(self._base, self._end))
         with open(path, "wb") as fh:
@@ -423,7 +424,7 @@ class Model:
             if limit is not None:
                 lo, hi = max(lo, limit[0]), min(hi, limit[1])
             if into is None:
-                into, base = bytearray(max(0, hi - lo)), lo
+                into, base = destination(max(0, hi - lo)), lo
             elif base is None:
                 base = lo
             self.last = transport(
@@ -437,7 +438,7 @@ class Model:
         lo = min(a for a, _ in spans)
         hi = max(b for _, b in spans)
         if into is None:
-            into, base = bytearray(hi - lo), lo
+            into, base = destination(hi - lo), lo
         elif base is None:
             base = lo
         self._fill(spans, into, base)

@@ -1176,3 +1176,32 @@ this size; at sizes below the mmap threshold it would be.
 sample. It also settles the ≤0.3 s bound inferred from the cold end-to-end runs:
 that bound was wrong, because it assumed the published cold timings included the
 allocation. They timed `_gather`, not `load()`.
+
+### Implemented — 2026-08-30
+
+`lmsluice/buffer.py`, wired into all four allocation sites in `model.py`. The
+alignment dance turned out not to be load-bearing after all and was dropped: a
+private anonymous mapping plus the advice is the whole fix, three lines.
+
+Verified on the real load path, fresh process each, n=5 median, same fixtures:
+
+| route | before | after | |
+|---|---|---|---|
+| plain | 0.873 s (2.15 GB/s) | 0.363 s (5.16 GB/s) | **2.40×** |
+| coded | 0.982 s (1.91 GB/s) | 0.478 s (3.92 GB/s) | **2.05×** |
+
+The threshold is `8 × Hugepagesize` read from `/proc/meminfo` — 16 MiB here,
+matching the measured crossover — rather than a named 16 MiB, because arm64 alone
+ships 64 KiB, 2 MiB, 32 MiB and 512 MiB huge pages. Machines that cannot back the
+mapping get `bytearray`, which on them is the faster of the two; `lmsluice probe`
+prints which it chose and why.
+
+**Two of the three details fail silently**, so `TestDestinationBuffer` checks the
+kernel's `AnonHugePages` accounting rather than the arguments passed. Both
+regressions were introduced deliberately to confirm the guard fires: dropping
+`MAP_PRIVATE` and dropping the `madvise` each fail it, and only it.
+
+**Absolute end-to-end load figures elsewhere in this file predate this and are
+~2× pessimistic on this box.** The gate verdicts do not move -- both routes paid
+the allocation equally -- with the one exception noted above, that coded against
+plain widens from 1.13× to 1.24× once the shared overhead is gone.

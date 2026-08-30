@@ -1348,5 +1348,106 @@ class TestLoansRetire(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestDestinationBuffer(unittest.TestCase):
+    """The destination costs more than the transport, so how it is got matters.
+
+    Two of the three things that make the cheap path cheap fail *silently* when
+    they regress -- a shared mapping and an unadvised one both allocate fine and
+    simply stop being backed by huge pages -- so these check the effect, not the
+    call.
+    """
+
+    def test_it_reads_as_zeroes_like_the_bytearray_it_replaces(self):
+        """The contract, and the reason this is not `numpy.empty`.
+
+        A partial load leaves the ranges nobody asked for untouched, and callers
+        are entitled to read them as zero rather than as the previous tenant's
+        bytes.
+        """
+        from lmsluice.buffer import destination
+
+        for n in (0, 1, 4096, 1 << 20, 32 << 20):
+            buf = destination(n)
+            self.assertEqual(len(buf), n)
+            self.assertEqual(bytes(memoryview(buf)), b"\x00" * n,
+                             f"{n} bytes came back non-zero")
+
+    def test_it_is_writable_through_a_memoryview(self):
+        """Every route fills it through one, so that is what must work."""
+        from lmsluice.buffer import destination
+
+        n = 32 << 20
+        buf = destination(n)
+        view = memoryview(buf).cast("B")
+        view[:5] = b"hello"
+        view[n - 5:] = b"world"
+        self.assertEqual(bytes(view[:5]), b"hello")
+        self.assertEqual(bytes(view[n - 5:]), b"world")
+
+    def test_small_buffers_do_not_pay_for_a_syscall(self):
+        """Measured parity below ~8 MB, so the mapping buys nothing there."""
+        from lmsluice.buffer import destination, strategy
+
+        how, _why, floor = strategy()
+        if how != "mapped":
+            self.skipTest(f"no mapped path here: {_why}")
+        self.assertIsInstance(destination(floor // 2), bytearray)
+        self.assertNotIsInstance(destination(floor), bytearray)
+
+    def test_the_threshold_is_derived_from_the_machine_not_named(self):
+        """arm64 alone ships 64 KiB, 2 MiB, 32 MiB and 512 MiB huge pages."""
+        from lmsluice.buffer import THRESHOLD_PAGES, huge_page_bytes, strategy
+
+        how, _why, floor = strategy()
+        if how != "mapped":
+            self.skipTest(_why)
+        self.assertEqual(floor, THRESHOLD_PAGES * huge_page_bytes())
+
+    def test_the_mapping_actually_gets_huge_pages(self):
+        """The regression guard for `MAP_PRIVATE` and for the advice.
+
+        Drop either and this still allocates, still zeroes, still passes every
+        other test here -- and quietly costs 5x. So it is checked against the
+        kernel's own accounting rather than against the arguments passed.
+        """
+        from lmsluice.buffer import destination, huge_page_bytes, strategy
+
+        how, why, floor = strategy()
+        if how != "mapped":
+            self.skipTest(why)
+        n = max(floor, 64 << 20)
+        buf = destination(n)
+        view = memoryview(buf).cast("B")
+        for i in range(0, n, huge_page_bytes()):   # fault it in
+            view[i] = 1
+        try:
+            with open("/proc/self/smaps") as fh:
+                backed = max((int(l.split()[1]) for l in fh
+                              if l.startswith("AnonHugePages:")), default=0)
+        except OSError:
+            self.skipTest("no /proc/self/smaps to check against")
+        self.assertGreaterEqual(
+            backed * 1024, n // 2,
+            "the destination is not backed by huge pages: MAP_PRIVATE or "
+            "MADV_HUGEPAGE has been dropped, and nothing else would show it")
+
+    def test_a_machine_without_huge_pages_says_so_and_falls_back(self):
+        """`strategy()` may not claim a mapping the kernel will not back."""
+        from lmsluice import buffer
+
+        saved_state, saved_probe = buffer._strategy, buffer._thp_mode
+        try:
+            buffer._strategy = None
+            buffer._thp_mode = lambda: "never"
+            how, why, floor = buffer.strategy()
+            self.assertEqual(how, "bytes")
+            self.assertIn("never", why)
+            self.assertEqual(floor, 0)
+            buffer._strategy = ("bytes", "forced", 0)
+            self.assertIsInstance(buffer.destination(64 << 20), bytearray)
+        finally:
+            buffer._strategy, buffer._thp_mode = saved_state, saved_probe
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

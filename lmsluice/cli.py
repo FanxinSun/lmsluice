@@ -20,6 +20,7 @@ import sys
 import time
 
 from . import __version__
+from . import buffer as _buffer
 from .plan import gate_ratio, write_plan
 from .probe import SAMPLE, encode_rate
 from .probe import run as probe_run
@@ -99,6 +100,14 @@ def _show_profile(p: Profile) -> None:
         note.append(f"depth {s.depth}")
         print(f"        {key:<14} {_gb(s.cold)} {_gb(s.warm)} {_gb(s.write)}"
               f"   ({'; '.join(note)})")
+    how, why, floor = _buffer.strategy()
+    print(f"\nbuffer  {how:<14} {why}")
+    if how == "mapped":
+        print(f"        {'':<14} used for destinations from "
+              f"{floor >> 20} MiB up; smaller ones stay on the heap")
+    else:
+        print(f"        {'':<14} destinations are zero-filled on the heap, "
+              f"which costs a full pass over them")
     print(f"\ncodec   {'name':<14} {'decode':>7} {'encode':>7} {'ratio':>7}  GB/s")
     for key, c in p.codecs.items():
         print(f"        {key:<14} {_gb(c.decode)} {_gb(c.encode)} "
