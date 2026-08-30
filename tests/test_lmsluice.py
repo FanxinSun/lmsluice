@@ -1517,24 +1517,28 @@ class TestGateModel(unittest.TestCase):
         """
         c = self.gate.cost_from(None)
         base = self.gate.Device("d", 100.0, "test", units=4,
-                                shmem_per_unit=128 << 10,
+                                shmem_pool_per_unit=128 << 10,
+                                shmem_cap_per_block=128 << 10,
                                 max_threads_per_unit=2048, clock_ghz=1.0,
                                 gflops=1_000)
         flops = self.gate.Device("d", 100.0, "test", units=4,
-                                 shmem_per_unit=128 << 10,
+                                 shmem_pool_per_unit=128 << 10,
+                                shmem_cap_per_block=128 << 10,
                                  max_threads_per_unit=2048, clock_ghz=1.0,
                                  gflops=1_000_000)
         self.assertEqual(base.compute_bound(c), flops.compute_bound(c),
                          "a FLOP rate reached the compute term")
 
         faster = self.gate.Device("d", 100.0, "test", units=4,
-                                  shmem_per_unit=128 << 10,
+                                  shmem_pool_per_unit=128 << 10,
+                                shmem_cap_per_block=128 << 10,
                                   max_threads_per_unit=2048, clock_ghz=2.0)
         a, b = base.compute_bound(c), faster.compute_bound(c)
         self.assertAlmostEqual(b[0] / a[0], 2.0, places=6)
 
         wider = self.gate.Device("d", 100.0, "test", units=8,
-                                 shmem_per_unit=128 << 10,
+                                 shmem_pool_per_unit=128 << 10,
+                                shmem_cap_per_block=128 << 10,
                                  max_threads_per_unit=2048, clock_ghz=1.0)
         self.assertAlmostEqual(wider.compute_bound(c)[0] / a[0], 2.0, places=6)
 
@@ -1575,12 +1579,54 @@ class TestGateModel(unittest.TestCase):
         ref = [d for d in self.gate.DEVICES if "5080" in d.name][0]
         lo = int(published.blocks_per_unit_at_measurement.low)
         hi = int(published.blocks_per_unit_at_measurement.high)
+        self.assertIsNotNone(ref.shmem_pool_per_unit, "pool not recorded")
+        self.assertIsNotNone(ref.shmem_cap_per_block, "cap not recorded")
         got = ref.blocks_per_unit(c)
         self.assertGreaterEqual(got, lo, "residency over- or under-predicted")
         self.assertLessEqual(got, hi,
                              f"model derives {got} blocks/unit where lmz "
                              f"measured {lo}-{hi}: the shared-memory budget "
                              f"this uses is not the one lmz divides by")
+
+    def test_cap_and_pool_are_not_interchangeable(self):
+        """lmz's residency_formula needs both, and they mean different things.
+
+        `blocks = floor(pool / shm) if shm <= cap else 0`. The cap decides
+        whether one block is legal; the pool decides how many fit. On discrete
+        NVIDIA parts they agree within a kilobyte, so conflating them is
+        invisible there and diverges by up to 3x on integrated parts -- the
+        device class this model exists for. This repository has now made that
+        conflation twice, in opposite directions.
+        """
+        c = self.gate.cost_from(None)
+        shm = c.shmem_per_block()
+
+        # A pool big enough for three, but a cap that forbids the block: zero.
+        self.assertEqual(c.blocks_per_unit(shm * 3, shm - 1, 4096), 0)
+        # The same pool with a permissive cap: three.
+        self.assertEqual(c.blocks_per_unit(shm * 3, shm, 4096), 3)
+        # A generous cap does not add residency; only the pool does.
+        self.assertEqual(c.blocks_per_unit(shm, shm * 100, 4096), 1)
+
+    def test_a_device_with_no_pool_gets_no_compute_term(self):
+        """An unobtained pool is not a small pool and must not collapse to one.
+
+        The 2-CU adapter has a queried cap (Vulkan's per-workgroup limit) and
+        no pool -- no core Vulkan query reports one, and the device is not
+        reachable from Vulkan under WSL2 at all. Substituting the cap gives
+        1 block and 1.9 GB/s; substituting an RDNA2 architectural figure gives
+        4 and 7.8. Both have been published by this file as though settled.
+        """
+        c = self.gate.cost_from(None)
+        small = [d for d in self.gate.DEVICES if "2-CU" in d.name][0]
+        self.assertIsNotNone(small.shmem_cap_per_block)
+        self.assertIsNone(small.shmem_pool_per_unit,
+                          "a pool was supplied for a device nobody has queried")
+        self.assertIsNone(small.blocks_per_unit(c))
+        self.assertIsNone(small.compute_bound(c))
+        lo, hi, why = small.predict(c)
+        self.assertEqual(lo, 0.0)
+        self.assertIn("bandwidth ceiling only", why)
 
     def test_the_small_igpu_row_stays_one_sided(self):
         """A tighter interval is not a measurement.
@@ -1594,7 +1640,6 @@ class TestGateModel(unittest.TestCase):
         small = [d for d in self.gate.DEVICES if "2-CU" in d.name][0]
         lo, hi, why = small.predict(c)
         self.assertEqual(lo, 0.0, "the 2-CU row grew a floor it has not earned")
-        self.assertIn("CEILING", why)
         self.assertFalse(small.occupancy_verified)
 
     def test_it_still_runs_with_nothing_installed(self):

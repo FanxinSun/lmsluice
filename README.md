@@ -185,7 +185,7 @@ Move the decoder instead of the disk and it flips again:
 | lmz CPU, through this transport | 5.95 | end to end | 0.94× |
 | lmz CUDA, per-chunk table, RTX 5080 | 111 | decode only | free; 1.49× by the ratio |
 | lmz CUDA, shared table, RTX 5080 | 418 | decode only | free; 1.49× by the ratio |
-| a 2-CU display iGPU, **predicted** | **≤ 1.9** | `gate.py`, projection | ≤ 0.30×, and no floor |
+| a 2-CU display iGPU, **predicted** | **≥ 3.4** | `gate.py`, projection | ≥ 0.54×, a floor not a ceiling |
 
 ### The last row used to be an interval this page could not narrow
 
@@ -239,27 +239,49 @@ rather than read — and two things stay genuinely unverified:
    bus.** Every bandwidth figure here assumes the decoder has the memory system
    to itself, which on an integrated GPU it does not.
 
-### The narrowing did not rescue the founding claim — it removed it
+### Residency needs two numbers, and this page kept using one
 
-The row above uses **32,768 bytes** of shared memory per unit, because that is
-what Vulkan on that adapter actually reports, and the kernel's request fits it
-with 1,024 bytes to spare — so **one block per unit**. That is not a pessimistic
-choice. It is the same kind of per-block figure that reproduces lmz's own
-measured occupancy on the reference card, where the alternative does not: the
-RTX 5080's 228 KiB per-SM pool derives 7 blocks per unit where lmz measured 3,
-over-predicting residency by 2.3× and every compute ceiling with it. This page
-carried that error until the cross-check was written.
+lmz publishes the rule as `residency_formula`:
 
-So the honest reading is that the smallest integrated GPU AMD ships is predicted
-at **no more than 1.9 GB/s against the CPU decoder's 2.0 — at most 1.0×.** It
-does not win. If the per-unit pool turns out to be the RDNA2 architectural
-128 KiB, a figure nobody has read off this adapter, the row would be 6.8 – 7.8
-GB/s instead; Vulkan does not expose the per-unit pool, so both readings stay
-open and the row stays a ceiling with no floor. What changed is which reading the
-evidence favours, and it is no longer the flattering one.
+    blocks = floor(pool / shm) if shm <= cap else 0
 
-Nothing here establishes that the iGPU wins. That is a question for the
-measurement, not for the wording.
+The **cap** decides whether one block is *legal*; the **pool** decides how many
+*fit*. On discrete NVIDIA parts they agree within a kilobyte — this card reports
+101,376 and 102,400 — so conflating them is invisible there. They diverge on
+integrated parts, which is the device class this project is for. This page has
+now made that conflation twice, in opposite directions, and stated the 2-CU row
+three different ways in one day: 4 – 36, then ≤ 7.8, then ≤ 1.9, and now what
+follows.
+
+**Every device fact in that row is now queried rather than assumed.** Through
+Vulkan on the Windows side, since the adapter is not reachable from Vulkan inside
+WSL2 at all — enumeration there returns a software rasteriser and nothing else:
+
+| quantity | value | source |
+|---|---|---|
+| cap | 32,768 B | `maxComputeSharedMemorySize` |
+| compute units | **2** | `VK_AMD_shader_core_properties`, and `activeComputeUnitCount` |
+| threads per CU | 2,048 | 16 wavefronts × 2 SIMD × 64 wide |
+| **pool** | **unobtained** | core Vulkan has no such query, and neither AMD shader-core extension — both present here, both queried — carries an LDS field |
+
+So the row still gets **no compute term**, the same as any unprobed device. But
+the pool is not unbounded below: **`pool ≥ cap` is forced**, because a unit that
+could not hold one legally-sized workgroup could never schedule one. That gives a
+floor of one block per CU, and with two CUs queried off the device, a floor of
+**≥ 3.4 GB/s against the CPU decoder's 2.0 — at least 1.7×**, more if the pool is
+the documented 64 KiB per CU.
+
+**That floor is arithmetic, not evidence.** It inherits every assumption above
+it, and two are unverified at exactly this scale — whether decode stays linear in
+resident lanes down to 2 CUs, and how a unified-memory part behaves with the CPU
+on the same bus — while the clock is derived from an FMA measurement rather than
+queried. It is a floor on the *model*, and the model is what is untested here.
+
+**What would settle it is not a better query.** The pool is not exposed by
+anything this adapter offers, so it can only be established by running the kernel
+on the device. That makes it a measurement question rather than a query one, and
+it is what a Vulkan backend would actually buy: not a tighter estimate, an end to
+estimating.
 
 What does not survive, either way, is reading any one desktop's NVMe as *the*
 disk.

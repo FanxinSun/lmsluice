@@ -189,12 +189,25 @@ class Constants:
         t = self.block_threads if threads is None else threads
         return self.lut_bytes + (t // self.lanes_per_group) * self.per_group_bytes
 
-    def blocks_per_unit(self, shmem_per_unit: int, max_threads_per_unit: int,
+    def blocks_per_unit(self, pool: int, cap: int, max_threads_per_unit: int,
                         threads: int | None = None) -> int:
-        """How many blocks a unit holds. Two limits apply; the smaller wins."""
+        """lmz's published `residency_formula`, applied.
+
+            blocks = floor(pool / shm) if shm <= cap else 0
+
+        **The cap and the pool are different quantities and both are needed.**
+        The cap says whether a block of this size is *legal* (CUDA's
+        `sharedMemPerBlockOptin`); the pool says how many *fit* (CUDA's
+        `sharedMemPerMultiprocessor`). On discrete NVIDIA parts they agree
+        within a kilobyte -- this card reports 101376 and 102400 -- which is
+        why conflating them is invisible there. They diverge by up to 3x on
+        integrated parts, which is exactly the device class this model exists
+        to serve, so the conflation fails only where it matters.
+        """
         t = self.block_threads if threads is None else threads
-        return min(shmem_per_unit // self.shmem_per_block(t),
-                   max_threads_per_unit // t)
+        if self.shmem_per_block(t) > cap:
+            return 0                       # the block cannot be launched at all
+        return min(pool // self.shmem_per_block(t), max_threads_per_unit // t)
 
 
 def _published(cost, field: str, default, pair: bool = False):
@@ -287,7 +300,8 @@ class Device:
     gb_s: float                     # peak DRAM bandwidth
     source: str                     # measured where, or derived how
     units: int | None = None        # SMs, WGPs, CUs: whatever owns a shmem pool
-    shmem_per_unit: int | None = None
+    shmem_pool_per_unit: int | None = None   # how many blocks FIT
+    shmem_cap_per_block: int | None = None   # whether one block is LEGAL
     max_threads_per_unit: int | None = None
     clock_ghz: float | None = None
     gflops: float | None = None     # kept only to show what the old model used
@@ -295,9 +309,14 @@ class Device:
                                          # not assumed from an architecture
 
     def blocks_per_unit(self, c: Constants) -> int | None:
-        if not self.shmem_per_unit or not self.max_threads_per_unit:
+        """None when the pool has not been obtained -- which is not the same as
+        a small pool, and must not collapse to one."""
+        if (not self.shmem_pool_per_unit or not self.shmem_cap_per_block
+                or not self.max_threads_per_unit):
             return None
-        return c.blocks_per_unit(self.shmem_per_unit, self.max_threads_per_unit)
+        return c.blocks_per_unit(self.shmem_pool_per_unit,
+                                 self.shmem_cap_per_block,
+                                 self.max_threads_per_unit)
 
     def resident_lanes(self, c: Constants) -> int | None:
         """Lanes resident across the device, from its own shared-memory budget.
@@ -403,15 +422,16 @@ class Device:
 # interval. `probe/` is what closes them.
 
 DEVICES = [
+    # Every figure below was read off the device with cuDeviceGetAttribute,
+    # not taken from a spec sheet or from lmz. An earlier version used 228 KiB
+    # as the pool and 2048 threads/SM; the device reports 102400 and 1536.
     Device("RTX 5080 (dGPU)", 960.0,
-           "bus and clock from lmz cost_model() provenance; 84 SMs, 2048 "
-           "threads/SM, and 99 KiB of shared memory per unit -- the opt-in "
-           "per-block figure lmz derives residency against, NOT the 228 KiB "
-           "per-SM pool. Using the pool over-predicts residency 2.3x and "
-           "reproduces none of lmz's published ceilings; 99 KiB reproduces "
-           "all of them. See the occupancy test.",
-           units=84, shmem_per_unit=101_376, max_threads_per_unit=2048,
-           clock_ghz=2.66, gflops=53_691,
+           "queried: 84 SMs, pool 102400 B/SM "
+           "(MAX_SHARED_MEMORY_PER_MULTIPROCESSOR), cap 101376 B/block "
+           "(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN), 1536 threads/SM, "
+           "2.617 GHz clock rate; bus from lmz cost_model() provenance",
+           units=84, shmem_pool_per_unit=102_400, shmem_cap_per_block=101_376,
+           max_threads_per_unit=1536, clock_ghz=2.66, gflops=53_691,
            occupancy_verified=True),   # lmz measured k on this device
     Device("M4 Max (unified)", 546.0,
            "spec bus; lanes and clock not taken -- Apple threadgroup memory "
@@ -427,20 +447,25 @@ DEVICES = [
            "class figure, blueprint §1; lanes and clock not taken",
            gflops=2_500),
     Device("Radeon 2-CU (iGPU)", 59.4,
-           "bus measured, MEASURED.md; clock 2.2 GHz from that file's FMA "
-           "arithmetic; shared memory 32768 B, which is what Vulkan on this "
-           "device actually reports (maxComputeSharedMemorySize) -- the same "
-           "kind of per-block cap that reproduces lmz's occupancy on the "
-           "reference card. The kernel's 31744 B request fits it with 1024 B "
-           "to spare, so this budget holds ONE block per unit. An earlier "
-           "version used 128 KiB, an RDNA2 architectural pool figure nobody "
-           "read off this adapter, which gave four blocks and a 4x higher "
-           "row. See the closing note.",
-           units=1, shmem_per_unit=32_768, max_threads_per_unit=2048,
+           "QUERIED from the device through Vulkan on the Windows side "
+           "(the adapter is not reachable from Vulkan inside WSL2 -- "
+           "enumeration there returns llvmpipe alone): 'AMD Radeon(TM) "
+           "Graphics', integrated, cap 32768 B "
+           "(maxComputeSharedMemorySize), 2 compute units "
+           "(VK_AMD_shader_core_properties: 1 engine x 1 array x 2 CUs, and "
+           "shader_core_properties2 activeComputeUnitCount=2), 2048 threads "
+           "per CU (16 wavefronts x 2 SIMD x 64 wide). Bus measured, "
+           "MEASURED.md; clock 2.2 GHz from that file's FMA arithmetic. "
+           "THE POOL IS UNOBTAINED -- see the closing note.",
+           units=2, shmem_cap_per_block=32_768, max_threads_per_unit=2048,
            clock_ghz=2.2, gflops=567),
-           # occupancy_verified stays False regardless: 32768 is a per-block
-           # cap and the per-unit pool is not something Vulkan exposes, so the
-           # row is a ceiling either way.
+           # shmem_pool_per_unit is deliberately absent, and it is not for want
+           # of looking: core Vulkan reports no per-unit pool, and NEITHER
+           # VK_AMD_shader_core_properties NOR shader_core_properties2 -- both
+           # present on this adapter and both queried -- has an LDS field at
+           # all. Substituting the cap for it, or an architectural figure for
+           # it, is an assumption wearing a number, and this model's whole job
+           # is to not do that.
 ]
 
 # The other axis, and the one the first version of this gate left out: the
@@ -575,47 +600,73 @@ def _table(codec_cost=None) -> None:
     print("a device it was not fitted on.\n")
 
     small = DEVICES[-1]
-    lo, hi, _ = small.predict(c)
     cpu = MEASURED_DECODE["lmz CPU, 4-16 threads"]
-    print("And the founding claim, stated as weakly as the evidence allows:")
-    print(f"the smallest integrated GPU AMD ships is predicted at no more than")
-    print(f"{hi:.1f} GB/s against the CPU decoder's {cpu:.1f} -- so at most "
-          f"{hi / cpu:.1f}x, and")
-    print("with no floor, because its occupancy is assumed rather than read.\n")
-
-    print("THE NARROWING IS NOT A MEASUREMENT. k went from 230-330 to 217-248")
-    print("because lmz swept its own card across grid sizes. NOBODY HAS RUN A")
-    print("2-CU DEVICE. Two things stay unverified, and they are worth more to")
-    print("a reader than the interval that just closed:")
+    print("And the founding claim, which this model CANNOT currently decide:")
     print()
-    print("  1. Whether decode stays linear in resident lanes all the way down")
-    print("     to 2 CUs, or meets a cache, scheduler or driver wall first. The")
-    print("     linearity was established over an 84x range ON ONE CARD, none of")
-    print("     it near this size.")
-    print("  2. How a unified-memory part behaves when the CPU is contending for")
-    print("     the same bus. Every bandwidth figure here assumes the decoder has")
-    print("     the memory system to itself, which on an iGPU it does not.")
+    print(f"{small.name} has a measured bus and clock and a queried CAP of")
+    print(f"{small.shmem_cap_per_block} B, so the kernel's {c.shmem_per_block()} B "
+          f"block is legal. But residency")
+    print("divides by the POOL, which is a different quantity. It was looked for")
+    print("and is not obtainable here: core Vulkan reports no per-unit pool, and")
+    print("VK_AMD_shader_core_properties and shader_core_properties2 -- both")
+    print("present on this adapter, both queried -- carry no LDS field at all.")
+    print("What the candidates would give:")
     print()
-    print("AND THE BUDGET THAT PRODUCES IT IS THE UNCERTAIN PART. The row above")
-    print("uses 32768 B, which is what Vulkan on that device actually reports,")
-    print("and the kernel's request fits it with 1024 B to spare -- so ONE block")
-    print("per unit. That is the same kind of per-block figure that reproduces")
-    print("lmz's own measured occupancy on the reference card, where the 228 KiB")
-    print("per-SM pool does not: the pool gives 7 blocks where lmz measured 3.")
-    print("So this is the defensible reading, not the pessimistic one.")
-    optimistic = Device(small.name, small.gb_s, small.source, units=small.units,
-                        shmem_per_unit=128 << 10,
-                        max_threads_per_unit=small.max_threads_per_unit,
-                        clock_ghz=small.clock_ghz)
-    opt = optimistic.compute_bound(c)
+    print(f"  {'candidate pool':<34}{'blocks':>7}{'lanes':>8}   decode GB/s   vs CPU")
+    for pool, why in ((small.shmem_cap_per_block, "the cap, if pool == cap"),
+                      (64 << 10, "64 KiB/CU, RDNA2 documented LDS")):
+        probe = Device(small.name, small.gb_s, "", units=small.units,
+                       shmem_pool_per_unit=pool,
+                       shmem_cap_per_block=small.shmem_cap_per_block,
+                       max_threads_per_unit=small.max_threads_per_unit,
+                       clock_ghz=small.clock_ghz)
+        b = probe.blocks_per_unit(c)
+        comp = probe.compute_bound(c)
+        band = min(comp[1], probe.bandwidth_bound(c))
+        print(f"  {why:<34}{b:>7}{probe.resident_lanes(c):>8}"
+              f"   {comp[0]:5.1f} - {band:4.1f}   {band/cpu:.1f}x")
     print()
-    print("If instead the per-unit pool is the RDNA2 architectural 128 KiB -- a")
-    print(f"figure nobody has read off this adapter -- the row would be "
-          f"{opt[0]:.1f}-{opt[1]:.1f}")
-    print(f"GB/s. Vulkan does not expose the per-unit pool, so both readings stay")
-    print("open and the row stays a ceiling. What has changed is which one the")
-    print("evidence favours, and it is no longer the flattering one.")
-
+    print("NEITHER IS A MEASUREMENT and the row above still carries no compute")
+    print("term, because an unobtained pool is not a known one. But the two")
+    print("candidates are not symmetric, and that is the useful part:")
+    print()
+    print("**pool >= cap is forced, not assumed.** A workgroup may legally")
+    print("declare `cap` bytes, so a unit that could not hold one such workgroup")
+    print("could never schedule it. So residency is AT LEAST floor(cap/shm) = 1")
+    print(f"block per CU, and with {small.units} CUs queried off the device that is a")
+    print("FLOOR on lanes, not a guess: the arithmetic cannot go below it.")
+    print()
+    floor_dev = Device(small.name, small.gb_s, "", units=small.units,
+                       shmem_pool_per_unit=small.shmem_cap_per_block,
+                       shmem_cap_per_block=small.shmem_cap_per_block,
+                       max_threads_per_unit=small.max_threads_per_unit,
+                       clock_ghz=small.clock_ghz)
+    fl = floor_dev.compute_bound(c)
+    fl_lo = min(fl[0], floor_dev.bandwidth_bound(c))
+    print(f"So the smallest integrated GPU AMD ships decodes at NO LESS THAN")
+    print(f"{fl_lo:.1f} GB/s by this model, against the CPU decoder's {cpu:.1f} -- "
+          f"at least {fl_lo/cpu:.1f}x,")
+    print("and more if the pool is the documented 64 KiB. The founding claim")
+    print("survives at its own lower bound rather than at a flattering reading.")
+    print()
+    print("THAT FLOOR IS ARITHMETIC, NOT EVIDENCE. It inherits every assumption")
+    print("above it, and two of them are unverified precisely at this scale:")
+    print("whether decode stays linear in resident lanes down to 2 CUs, and how")
+    print("a unified-memory part behaves with the CPU on the same bus. The clock")
+    print("is derived from an FMA measurement rather than queried. So this is a")
+    print("floor on the MODEL, and the model is what is untested here.")
+    print()
+    print("This row has now been stated three different ways in one day -- 4-36,")
+    print("then <= 7.8, then <= 1.9 -- each time because a shared-memory number")
+    print("was substituted for one it is not. The lesson is in the file rather")
+    print("than the number: cap and pool are different quantities, and every")
+    print("device fact above is now queried or marked unobtained.")
+    print()
+    print("What would settle it is this adapter's LDS per compute unit, or one")
+    print("run of the kernel on it. The first is not available: core Vulkan does")
+    print("not report it and neither AMD shader-core extension carries it. So it")
+    print("is a MEASUREMENT question, not a query question, and that is what a")
+    print("Vulkan backend would buy -- not a better estimate, an end to them.")
 
 
 def main() -> None:
