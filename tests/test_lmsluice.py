@@ -1180,6 +1180,100 @@ class TestBoundary(unittest.TestCase):
                 with open(os.path.join(self.PACKAGE, name)) as fh:
                     yield name, fh.read()
 
+    # The one module allowed to know torch exists. "Runs with no torch" is a
+    # recorded competitive difference, not a preference -- competition.md §4
+    # lists ZipNN, tensorizer, Run:ai and fastsafetensors as unable to import
+    # without a tensor framework, and §7 counts "no install required" as a row
+    # only lmsluice ticks.
+    TORCH_ADAPTERS = {"torchadapter.py"}
+
+    def test_only_the_torch_adapter_imports_torch(self):
+        """One stray import would retire a published claim, silently."""
+        offenders = []
+        for name, src in self.sources():
+            if name in self.TORCH_ADAPTERS:
+                continue
+            for line in src.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if stripped.startswith(("import torch", "from torch")):
+                    offenders.append(f"{name}: {stripped}")
+        self.assertEqual(offenders, [],
+                         "only lmsluice/torchadapter.py may import torch -- "
+                         "'needs nothing installed' is a competitive claim in "
+                         "docs/competition.md §4 and §7")
+
+    def test_the_core_imports_with_torch_made_unavailable(self):
+        """Proved by importing it that way, not by grepping for the import.
+
+        A source walk catches `import torch`; it does not catch a dependency
+        that pulls torch in transitively, or a module-level `numpy` that only
+        happens to be installed here. This imports every core module in a
+        fresh interpreter with torch forced to fail, which is the claim as a
+        user on a phone or a CUDA-less laptop would experience it.
+        """
+        import subprocess
+
+        prog = (
+            "import sys\n"
+            "class Block:\n"
+            "    def find_module(self, name, path=None):\n"
+            "        return self if name == 'torch' or name.startswith('torch.') else None\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name == 'torch' or name.startswith('torch.'):\n"
+            "            raise ImportError('torch is hidden by the test')\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "sys.path.insert(0, %r)\n"
+            "import importlib, pkgutil, lmsluice\n"
+            "bad = []\n"
+            "for m in pkgutil.iter_modules(lmsluice.__path__):\n"
+            "    if m.name == 'torchadapter':\n"
+            "        continue\n"
+            "    try:\n"
+            "        importlib.import_module('lmsluice.' + m.name)\n"
+            "    except Exception as e:\n"
+            "        bad.append(m.name + ': ' + type(e).__name__ + ': ' + str(e))\n"
+            "print('OK' if not bad else 'FAILED ' + '; '.join(bad))\n"
+        ) % os.path.dirname(self.PACKAGE)
+        r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                           text=True, timeout=180)
+        self.assertIn("OK", r.stdout,
+                      f"the core does not import without torch:\n"
+                      f"{r.stdout}\n{r.stderr[-600:]}")
+
+    def test_the_torch_adapter_itself_imports_without_torch(self):
+        """Importing the adapter must not require torch either -- only calling it.
+
+        Otherwise `from lmsluice import torchadapter` inside a `try` becomes
+        the way people test for the feature, and an ImportError at import time
+        is indistinguishable from the package being broken.
+        """
+        import subprocess
+
+        prog = (
+            "import sys\n"
+            "class Block:\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name == 'torch' or name.startswith('torch.'):\n"
+            "            raise ImportError('hidden')\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "sys.path.insert(0, %r)\n"
+            "from lmsluice import torchadapter\n"
+            "ok, why = torchadapter.available()\n"
+            "assert ok is False, 'available() should report torch missing'\n"
+            "try:\n"
+            "    torchadapter.load_file('x.safetensors')\n"
+            "except ImportError as e:\n"
+            "    assert 'lmsluice[torch]' in str(e), str(e)\n"
+            "    print('OK')\n"
+        ) % os.path.dirname(self.PACKAGE)
+        r = subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                           text=True, timeout=180)
+        self.assertIn("OK", r.stdout, f"{r.stdout}\n{r.stderr[-600:]}")
+
     def test_only_the_adapters_import_lmz(self):
         offenders = []
         for name, src in self.sources():
@@ -1690,6 +1784,159 @@ class TestGateModel(unittest.TestCase):
             self.assertIn("decode faster than its disk", r.stdout)
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+
+try:
+    import torch
+    import torch as _TORCH
+except Exception:                              # noqa: BLE001 -- absence is the point
+    _TORCH = None
+needs_torch = unittest.skipIf(_TORCH is None, "torch is not installed")
+
+
+@needs_torch
+class TestTorchAdapter(unittest.TestCase):
+    """`load_file` against the bytes it claims to reproduce.
+
+    The comparison is with the fixture's own bytes rather than with
+    `safetensors`, so the suite does not acquire a second optional dependency
+    to test the first. (It has also been checked against
+    `safetensors.torch.load_file` on 1.87 GB of real BF16 weights, on both
+    routes and on CUDA -- see the report; that is not something a unit test
+    should carry.)
+    """
+
+    DTYPES = {"F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "U8": 1}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        rng = random.Random(11)
+        self.raw = {}
+        spec = {}
+        for i, (dt, width) in enumerate(self.DTYPES.items()):
+            n = 8 + i
+            payload = bytes(rng.randrange(256) for _ in range(n * width))
+            self.raw[f"w_{dt}"] = payload
+            spec[f"w_{dt}"] = (dt, (n,), payload)
+        # One 2-D tensor, because reshape is the part most easily got wrong.
+        flat = bytes(rng.randrange(256) for _ in range(2 * 3 * 4))
+        self.raw["w_2d"] = flat
+        spec["w_2d"] = ("F32", (2, 3), flat)
+        self.plain = write_safetensors(
+            os.path.join(self.dir, "m.safetensors"), spec)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _check(self, got):
+        self.assertEqual(set(got), set(self.raw))
+        for name, want in self.raw.items():
+            t = got[name]
+            self.assertEqual(
+                t.detach().cpu().contiguous().view(torch.uint8)
+                 .reshape(-1).numpy().tobytes(), want,
+                f"{name}: bytes differ")
+        self.assertEqual(tuple(got["w_2d"].shape), (2, 3))
+        self.assertEqual(got["w_BF16"].dtype, torch.bfloat16)
+
+    def test_the_plain_route_reproduces_the_file_bytes(self):
+        from lmsluice.torchadapter import load_file
+
+        self._check(load_file(self.plain))
+
+    def test_the_coded_route_reproduces_the_same_bytes(self):
+        """The offset arithmetic differs by route, so both are checked.
+
+        A plain safetensors file bases its buffer at 0 and a coded archive at
+        the member's own start, so `t.start - base` is not the same expression
+        in the two cases even though the adapter code is.
+        """
+        from lmsluice.torchadapter import load_file
+        from lmsluice.zstdcodec import encoder
+
+        coded = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, coded)
+        self._check(load_file(coded))
+
+    def test_the_tensors_are_views_into_one_buffer(self):
+        """Zero-copy is the reason this lives in the package, so it is checked.
+
+        Every tensor should point inside a single allocation the size of the
+        model, not into `len(tensors)` separate ones.
+        """
+        from lmsluice.torchadapter import load_file
+
+        got = load_file(self.plain)
+        ptrs = sorted(t.data_ptr() for t in got.values())
+        total = sum(t.numel() * t.element_size() for t in got.values())
+        self.assertLessEqual(ptrs[-1] - ptrs[0], total,
+                             "tensors are spread across separate allocations")
+
+    def test_a_device_it_cannot_fill_is_refused_by_name(self):
+        from lmsluice.torchadapter import load_file
+
+        with self.assertRaises(ValueError) as caught:
+            load_file(self.plain, device="mps")
+        self.assertIn("mps", str(caught.exception))
+
+    def test_every_mapped_dtype_exists_in_this_torch(self):
+        """The mapping is data, so a typo in it fails here and not at a user."""
+        from lmsluice import torchadapter
+
+        missing = [(k, v) for k, v in torchadapter._DTYPES.items()
+                   if not hasattr(torch, v)]
+        # Only the newest dtypes may legitimately be absent on an older torch.
+        unexpected = [k for k, _ in missing
+                      if k not in {"F8_E4M3", "F8_E5M2", "U16", "U32", "U64"}]
+        self.assertEqual(unexpected, [],
+                         f"dtype names not present in torch {torch.__version__}")
+
+
+@needs_torch
+@needs_cuda
+class TestTorchAdapterCuda(unittest.TestCase):
+    """The device path, which has an alignment problem the host path does not."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        rng = random.Random(12)
+        payload = bf16_bytes(rng, 256)
+        self.raw = {"w": payload}
+        self.plain = write_safetensors(
+            os.path.join(self.dir, "m.safetensors"), {"w": ("BF16", (256,), payload)})
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_it_lands_on_the_device_with_the_right_bytes(self):
+        from lmsluice.torchadapter import load_file
+
+        got = load_file(self.plain, device="cuda")
+        self.assertEqual(got["w"].device.type, "cuda")
+        self.assertEqual(got["w"].dtype, torch.bfloat16)
+        self.assertEqual(
+            got["w"].detach().cpu().contiguous().view(torch.uint8)
+                   .reshape(-1).numpy().tobytes(), self.raw["w"])
+
+    def test_it_copies_only_what_alignment_forces(self):
+        """A misaligned tensor must be copied, and the result must say so.
+
+        safetensors puts tensor data straight after a JSON header of arbitrary
+        length, so whether any tensor can be viewed in place is a property of
+        the file. The adapter reports the bytes it had to move rather than
+        claiming a zero-copy it may not have achieved.
+        """
+        from lmsluice.torchadapter import load_file
+
+        got = load_file(self.plain, device="cuda")
+        moved = getattr(got["w"], "_lmsluice_copied_bytes", None)
+        self.assertIsNotNone(moved, "the device path did not report its copies")
+        self.assertIn(moved, (0, len(self.raw["w"])),
+                      "copied bytes should be none of the tensor or all of it")
 
 
 if __name__ == "__main__":

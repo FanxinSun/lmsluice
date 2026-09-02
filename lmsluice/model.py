@@ -98,6 +98,7 @@ class Model:
         self._arc: Archive | None = None
         self._src = None
         self._mm = None
+        self._mm_access = None
         f, p = default_threads()
         self._fetch_threads = fetch_threads or f
         self._place_threads = place_threads or p
@@ -153,6 +154,18 @@ class Model:
     def ratio(self) -> float:
         return self.coded_bytes / self.plain_bytes if self.plain_bytes else 1.0
 
+    @property
+    def base(self) -> int:
+        """The plain offset that `load()` and `to_device()` buffers start at.
+
+        Both return a buffer covering `plain_bytes` of this member, and a
+        tensor's own bytes sit at `t.start - base` within it. Public because an
+        adapter turning those buffers into somebody else's tensor type needs
+        the contract, and reading it off a private attribute would make that
+        contract accidental rather than stated.
+        """
+        return self._base
+
     def span_of(self, names) -> list[tuple[int, int]]:
         """The byte ranges holding a set of tensors, merged where adjacent.
 
@@ -172,17 +185,28 @@ class Model:
         return [(a, b) for a, b in out]
 
     # -- getting the bytes ------------------------------------------------
-    def map(self) -> memoryview:
-        """The whole member, mapped, with no bytes moved until touched."""
+    def map(self, *, writable: bool = False) -> memoryview:
+        """The whole member, mapped, with no bytes moved until touched.
+
+        `writable` maps copy-on-write (`MAP_PRIVATE`) instead of read-only.
+        The file is still never modified -- a write lands on a private page --
+        but the buffer reports itself as writable, which is what a tensor
+        library needs before it will adopt the memory. Reads cost the same
+        either way; only a page actually written is ever copied.
+        """
         if self.route == "coded":
             raise NotMappable(
                 f"{self.target} is an lmz archive: a coded file cannot be "
                 f"mapped. Use load() or stream(), or to_file() to expand it.")
         if not isinstance(self._src, FileSource):
             raise NotMappable("only a local file can be mapped")
+        want = mmap.ACCESS_COPY if writable else mmap.ACCESS_READ
+        if self._mm is not None and self._mm_access != want:
+            self._mm.close()
+            self._mm = None
         if self._mm is None:
-            self._mm = mmap.mmap(self._src.fileno(), 0,
-                                 access=mmap.ACCESS_READ)
+            self._mm = mmap.mmap(self._src.fileno(), 0, access=want)
+            self._mm_access = want
         return memoryview(self._mm)
 
     def load(self, names=None, into=None) -> memoryview:

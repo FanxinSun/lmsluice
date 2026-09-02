@@ -517,11 +517,23 @@ it and marked as such in its own header.
 
 Stated plainly, because a page that lists only what works is not a description.
 
-- **It does not hand you tensors.** `safetensors.torch.load_file()` returns a
-  dict of `torch.Tensor`; this returns a `memoryview` and a tensor index. The
-  dtype and shape are there and the conversion is a few lines, but until it is
-  written nobody can drop this in, and that is the single biggest thing between
-  the numbers above and anyone using them.
+- ~~**It does not hand you tensors.**~~ **It does now**, and this was the single
+  biggest thing between the numbers above and anyone using them:
+
+      -from safetensors.torch import load_file
+      +from lmsluice.torchadapter import load_file
+
+  Same call, same returned `dict[str, torch.Tensor]`, `device="cuda:0"`
+  included. Torch lives in that one module and nothing else in the package
+  imports it, so the core still needs nothing installed — a test walks the
+  source and a second imports the whole core with torch forced to fail.
+
+  A plain local file is **mapped, not read**, the same mechanism safetensors
+  uses, and measures at parity with it (0.089 s against 0.085 s on a warm
+  1.87 GB BF16 checkpoint, fresh process, n=5 median). An archive is decoded
+  through the transport, which on that warm cache is 6.5× slower — the gate
+  says so too, since warm the "link" is RAM at 22 GB/s and no CPU decoder
+  competes with that. Cold, the verdict reverses; `MEASURED.md` has both.
 - **It does not speak object storage.** Plain HTTP with range requests, no S3,
   GCS or Azure, no auth. Which is awkward, because the download is the case with
   the best arithmetic in this repository.

@@ -271,7 +271,7 @@ Rows are capabilities; a blank means the tool does not have it.
 | **no install required** | ✅ (stdlib zstd) | | | | | | | |
 | decode on GPU | ✅ (lmz CUDA) | | | | n/a | | | |
 | GPUDirect Storage | | | | | ✅ | | | |
-| **returns torch tensors** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | n/a | ✅ |
+| **returns torch tensors** | ✅ (optional extra) | ✅ | ✅ | ✅ | ✅ | ✅ | n/a | ✅ |
 | vLLM integration | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | pip-installable | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **measures the machine** | ✅ | | | | | | adaptive concurrency only | tiering only |
