@@ -243,8 +243,12 @@ compress" is a forty-year-old idea in filesystems. What none of that prior art
 does is compare a **decode rate** against a **link rate** and report the verdict
 to the user with the numbers behind it — they all ask "did this compress?", not
 "is my decoder faster than my disk?". Those are different questions with
-different answers, and the second one is the only one that can conclude *"your
-archive costs you 6× on load time"*.
+different answers, and the second one is the only one that can conclude *"on
+this machine the archive loads at 0.74× the speed of the plain file"* — which is
+this box's measured verdict, and a recommendation against the thing being sold.
+(The 6× this sentence used to quote was the retired figure that paired the
+fastest plain read with the slowest coded one; §2 above and `MEASURED.md` carry
+the correction.)
 
 So `strategy.md`'s claim — *"they all assume streaming or compression is
 better; we measure the machine and sometimes say no"* — **survives contact with
@@ -319,7 +323,9 @@ the user to use the plain file.
    publishes a falsifiable prediction of its own speedup, let alone checks it
    at run time.
 3. **A codec that needs nothing installed.** stdlib zstd — 21.1% saved,
-   0.59–0.71 GB/s single-threaded on this box. ZipNN needs numpy, zstandard and
+   **0.77 GB/s single-threaded** on this box and 1.69 at 8–16 threads, where it
+   stops scaling (`MEASURED.md`); an earlier 0.59–0.71 here predates that
+   measurement. ZipNN needs numpy, zstandard and
    torch; tensorizer needs torch and boto3; fastsafetensors needs CUDA and
    `cufile`. On the machines this project is for, "pip install" is often the
    whole obstacle.
