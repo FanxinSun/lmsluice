@@ -534,6 +534,19 @@ Stated plainly, because a page that lists only what works is not a description.
   through the transport, which on that warm cache is 6.5× slower — the gate
   says so too, since warm the "link" is RAM at 22 GB/s and no CPU decoder
   competes with that. Cold, the verdict reverses; `MEASURED.md` has both.
+- **vLLM can use it**, as `--load-format lmsluice`, through the registration
+  mechanism vLLM actually has: a `BaseModelLoader` subclass reached from a
+  `vllm.general_plugins` entry point, so installing the package adds the option
+  and uninstalling removes it. It streams a window at a time rather than
+  handing over a dict, because vLLM's interface is a generator so a large
+  checkpoint never exists twice.
+
+  **Verified as far as this machine allows and no further.** The registration,
+  the abstract-method contract and the generator hand-off are tested against a
+  stub written from vLLM's published source. vLLM itself is multi-gigabyte and
+  is not installed here, so *"vLLM accepts it"* is untested and is not claimed.
+  On a fast local disk it will read the plain file and decline to help, which
+  is the gate working rather than the loader failing.
 - **It does not speak object storage.** Plain HTTP with range requests, no S3,
   GCS or Azure, no auth. Which is awkward, because the download is the case with
   the best arithmetic in this repository.

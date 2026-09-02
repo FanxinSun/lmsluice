@@ -1215,6 +1215,28 @@ class TestBoundary(unittest.TestCase):
     # only lmsluice ticks.
     TORCH_ADAPTERS = {"torchadapter.py"}
 
+    VLLM_ADAPTERS = {"vllmloader.py"}
+
+    def test_only_the_vllm_loader_imports_vllm(self):
+        """Same containment as lmz and torch, for the same reason.
+
+        `vllmloader` is imported by vLLM and by nothing else, so it may import
+        vLLM at module scope. Anywhere else that import would make the package
+        require a multi-gigabyte inference server to open a file.
+        """
+        offenders = []
+        for name, src in self.sources():
+            if name in self.VLLM_ADAPTERS:
+                continue
+            for line in src.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if stripped.startswith(("import vllm", "from vllm")):
+                    offenders.append(f"{name}: {stripped}")
+        self.assertEqual(offenders, [],
+                         "only lmsluice/vllmloader.py may import vllm")
+
     def test_only_the_torch_adapter_imports_torch(self):
         """One stray import would retire a published claim, silently."""
         offenders = []
@@ -1257,7 +1279,7 @@ class TestBoundary(unittest.TestCase):
             "import importlib, pkgutil, lmsluice\n"
             "bad = []\n"
             "for m in pkgutil.iter_modules(lmsluice.__path__):\n"
-            "    if m.name == 'torchadapter':\n"
+            "    if m.name in ('torchadapter', 'vllmloader'):\n"
             "        continue\n"
             "    try:\n"
             "        importlib.import_module('lmsluice.' + m.name)\n"
@@ -1966,6 +1988,162 @@ class TestTorchAdapterCuda(unittest.TestCase):
         self.assertIsNotNone(moved, "the device path did not report its copies")
         self.assertIn(moved, (0, len(self.raw["w"])),
                       "copied bytes should be none of the tensor or all of it")
+
+
+class TestVllmLoader(unittest.TestCase):
+    """The vLLM loader, against a stub of the two symbols it builds on.
+
+    vLLM is multi-gigabyte and is not installed here, so what can be checked is
+    the contract: that the decorator registers under the name users will type,
+    that the class satisfies `BaseModelLoader`, and that `load_weights` hands
+    the model a generator of `(name, tensor)` rather than a materialised dict.
+    The stub is written from vLLM's published source for `BaseModelLoader` and
+    `register_model_loader`.
+
+    **What this cannot check is that vLLM accepts it**, and nothing on this
+    machine can. That needs a box with vLLM installed and is recorded as such.
+    """
+
+    def _stub_vllm(self):
+        """Install a minimal `vllm.model_executor.model_loader` and return the
+        registry the decorator writes into."""
+        import types
+
+        registry = {}
+
+        class BaseModelLoader:
+            def __init__(self, load_config=None):
+                self.load_config = load_config
+
+        def register_model_loader(load_format):
+            def wrap(cls):
+                if not issubclass(cls, BaseModelLoader):
+                    raise TypeError("not a BaseModelLoader")
+                registry[load_format] = cls
+                return cls
+            return wrap
+
+        loader = types.ModuleType("vllm.model_executor.model_loader")
+        loader.BaseModelLoader = BaseModelLoader
+        loader.register_model_loader = register_model_loader
+        executor = types.ModuleType("vllm.model_executor")
+        executor.model_loader = loader
+        root = types.ModuleType("vllm")
+        root.model_executor = executor
+        for name, mod in (("vllm", root),
+                          ("vllm.model_executor", executor),
+                          ("vllm.model_executor.model_loader", loader)):
+            self._added.append(name)
+            sys.modules[name] = mod
+        return registry
+
+    def _load_module(self):
+        import importlib
+
+        sys.modules.pop("lmsluice.vllmloader", None)
+        self._added.append("lmsluice.vllmloader")
+        return importlib.import_module("lmsluice.vllmloader")
+
+    def setUp(self):
+        self._added = []
+        self.dir = tempfile.mkdtemp()
+        rng = random.Random(21)
+        self.payload = bf16_bytes(rng, 64)
+        self.plain = write_safetensors(
+            os.path.join(self.dir, "model.safetensors"),
+            {"w": ("BF16", (64,), self.payload)})
+
+    def tearDown(self):
+        import shutil
+
+        for name in self._added:
+            sys.modules.pop(name, None)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_it_registers_under_the_name_users_type(self):
+        registry = self._stub_vllm()
+        mod = self._load_module()
+        self.assertIn("lmsluice", registry,
+                      "--load-format lmsluice would not resolve")
+        self.assertIs(registry["lmsluice"], mod.LmsluiceModelLoader)
+        mod.register()          # the entry point must be callable and harmless
+
+    def test_it_implements_both_abstract_methods(self):
+        self._stub_vllm()
+        mod = self._load_module()
+        for name in ("download_model", "load_weights"):
+            self.assertTrue(callable(getattr(mod.LmsluiceModelLoader, name, None)),
+                            f"{name} is required by BaseModelLoader")
+
+    def test_a_repository_id_is_refused_with_the_reason(self):
+        """Failing here beats failing after the engine is half up."""
+        self._stub_vllm()
+        mod = self._load_module()
+
+        class Cfg:
+            model = "meta-llama/Llama-3.1-8B"
+
+        loader = mod.LmsluiceModelLoader(load_config=None)
+        with self.assertRaises(ValueError) as caught:
+            loader.download_model(Cfg())
+        self.assertIn("no Hub", str(caught.exception))
+
+    def test_a_local_path_needs_no_download(self):
+        self._stub_vllm()
+        mod = self._load_module()
+
+        class Cfg:
+            model = self.dir
+
+        self.assertIsNone(
+            mod.LmsluiceModelLoader(load_config=None).download_model(Cfg()))
+
+    @needs_zstd
+    def test_a_coded_archive_is_preferred_over_the_plain_file(self):
+        """Both present is the normal case while someone is evaluating this;
+        reading both would load every weight twice."""
+        self._stub_vllm()
+        mod = self._load_module()
+        from lmsluice.zstdcodec import encoder
+
+        encoder().encode(self.plain, os.path.join(self.dir, "model.lmsl"))
+        got = mod.model_files(self.dir)
+        self.assertEqual([os.path.basename(f) for f in got], ["model.lmsl"])
+
+    @needs_torch
+    def test_load_weights_hands_the_model_a_generator_of_pairs(self):
+        """The contract that matters: a generator, not a dict.
+
+        vLLM's signature is a generator so a large checkpoint never exists
+        twice. Passing a dict would satisfy the type and defeat the point.
+        """
+        import inspect
+
+        self._stub_vllm()
+        mod = self._load_module()
+
+        class Cfg:
+            model = self.dir
+
+        seen = []
+
+        class FakeModel:
+            def load_weights(self, weights):
+                self.kind = weights
+                for name, tensor in weights:
+                    seen.append((name, tensor))
+
+        fake = FakeModel()
+        mod.LmsluiceModelLoader(load_config=None).load_weights(fake, Cfg())
+        self.assertTrue(inspect.isgenerator(fake.kind),
+                        "a materialised container was passed, not a generator")
+        self.assertEqual([n for n, _ in seen], ["w"])
+        name, ten = seen[0]
+        self.assertEqual(ten.dtype, torch.bfloat16)
+        self.assertEqual(tuple(ten.shape), (64,))
+        self.assertEqual(
+            ten.detach().cpu().contiguous().view(torch.uint8)
+               .reshape(-1).numpy().tobytes(), self.payload)
 
 
 if __name__ == "__main__":

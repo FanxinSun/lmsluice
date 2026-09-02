@@ -47,6 +47,15 @@ all = ["lmzip>=1.3.0", "torch>=2.0"]
 [project.scripts]
 lmsluice = "lmsluice.cli:main"
 
+# How vLLM finds the loader. vLLM imports every `vllm.general_plugins` entry
+# point at startup, and importing `lmsluice.vllmloader` is what runs its
+# `@register_model_loader("lmsluice")` -- so installing this package adds
+# `--load-format lmsluice` to a vLLM that was never told about it, and
+# uninstalling removes it. The `--load-format-plugin` RFC that would have made
+# this a flag was closed as not planned.
+[project.entry-points."vllm.general_plugins"]
+lmsluice = "lmsluice.vllmloader:register"
+
 [project.urls]
 Documentation = "https://github.com/yfce/lmsluice/blob/main/README.md"
 

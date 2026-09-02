@@ -132,6 +132,42 @@ def load_file(filename, device="cpu"):
         raise
 
 
+def stream_tensors(filename, *, budget: int | None = None):
+    """Yield `(name, tensor)` a window at a time, holding a bounded amount.
+
+    `load_file` materialises a whole checkpoint, which is what safetensors does
+    and what most callers want. An inference server does not: vLLM's
+    `model.load_weights` consumes a generator precisely so that a 70 B model
+    never exists twice, once in the loader and once in the parameters. Feeding
+    it a dict would defeat the design and put the whole checkpoint in host RAM.
+
+    So this drives `Model.stream()`, which reads a window, yields the tensors
+    inside it, and drops the window before reading the next. Each tensor holds
+    its own window open, so memory falls as the consumer lets go rather than
+    when this generator finishes -- a consumer that copies each tensor into a
+    parameter and moves on, which is exactly what a weight loader does, never
+    holds more than one window.
+    """
+    torch = _torch()
+    m = open_model(str(filename))
+    try:
+        kw = {} if budget is None else {"budget": budget}
+        for name, mv in m.stream(**kw):
+            t = m.tensors[name]
+            dt = _dtype(torch, t.dtype, name)
+            if t.nbytes == 0:
+                yield name, torch.empty(_shape(t), dtype=dt)
+                continue
+            ten = torch.frombuffer(mv, dtype=dt).reshape(_shape(t))
+            # The slice is what keeps the window alive; naming it here means a
+            # consumer that keeps the tensor keeps its bytes, and one that does
+            # not lets the window go at the next iteration.
+            ten._lmsluice_keepalive = mv
+            yield name, ten
+    finally:
+        m.close()
+
+
 def _host(m, torch, prefer_map: bool = True) -> dict:
     """Tensors over the plain bytes, by whichever of two routes fits.
 
