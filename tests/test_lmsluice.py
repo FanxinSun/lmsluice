@@ -26,6 +26,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import lmsluice as _lmsluice_pkg                                     # noqa: E402
 from lmsluice import plan as P                                        # noqa: E402
 from lmsluice.model import _windows, open_model                       # noqa: E402
 from lmsluice.source import FileSource, HttpSource, open_source       # noqa: E402
@@ -39,6 +40,28 @@ except Exception:                         # noqa: BLE001
     LMZ = None
 
 needs_lmz = unittest.skipIf(LMZ is None, "lmz is not importable")
+
+# The stdlib codec needs Python 3.14's `compression.zstd`, or the `zstandard`
+# package on an older one. That is a property of the interpreter rather than a
+# fault, and `zstdcodec` says so itself -- so the tests that need it skip and
+# the rest of the suite still reports on 3.10 through 3.13.
+try:
+    from lmsluice.zstdcodec import _zstd as _probe_zstd
+
+    _probe_zstd()
+    _ZSTD_WHY = ""
+except Exception as _exc:                     # noqa: BLE001 -- absence is the point
+    _ZSTD_WHY = str(_exc).split(".")[0]
+needs_zstd = unittest.skipIf(_ZSTD_WHY, f"no zstd: {_ZSTD_WHY}")
+
+# Some invariants are properties of the repository rather than of the package
+# -- that `docs/boundary.md` exists and is linked, for one. They cannot hold
+# when the suite runs against an installed wheel, which ships code and not
+# documentation, so they say so instead of failing.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+needs_repo = unittest.skipUnless(
+    os.path.isdir(os.path.join(REPO, "docs")),
+    "running against an installed package, not the repository")
 
 
 # -- fixtures --------------------------------------------------------------
@@ -944,6 +967,7 @@ class TestDeviceDecode(unittest.TestCase):
                 dst.close()
 
 
+@needs_zstd
 class TestZstdCodec(unittest.TestCase):
     """The codec that needs nothing installed. No lmz in any of these."""
 
@@ -1028,6 +1052,7 @@ class TestZstdCodec(unittest.TestCase):
             c.close()
 
 
+@needs_zstd
 class TestCache(unittest.TestCase):
     """Compress on first fetch — and only where the gate says it pays."""
 
@@ -1119,8 +1144,11 @@ class TestBoundary(unittest.TestCase):
     day someone happens to import it on a machine where lmz is absent.
     """
 
-    PACKAGE = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lmsluice")
+    # Located through the imported package rather than by path arithmetic from
+    # this file, so the boundary is checked on the tree that actually got
+    # imported -- which is the installed one when the suite runs against a
+    # wheel, and that is the tree whose contents ship.
+    PACKAGE = os.path.dirname(os.path.abspath(_lmsluice_pkg.__file__))
 
     # The modules allowed to know lmz exists. `_lmz` finds it, `lmzcodec` is
     # its adapter, `devdecode` is a registered loan (`merge.cu`'s dispatch).
@@ -1311,6 +1339,7 @@ class TestBoundary(unittest.TestCase):
         self.assertEqual(offenders, [],
                          "coded-stream structure belongs in the adapter (I4)")
 
+    @needs_repo
     def test_the_boundary_document_exists_and_is_linked(self):
         root = os.path.dirname(self.PACKAGE)
         doc = os.path.join(root, "docs", "boundary.md")
@@ -1775,9 +1804,9 @@ class TestGateModel(unittest.TestCase):
 
         d = tempfile.mkdtemp()
         try:
-            shutil.copy(os.path.join(os.path.dirname(__file__), "..",
-                                     "lmsluice", "gate.py"),
-                        os.path.join(d, "gate.py"))
+            shutil.copy(
+                os.path.join(os.path.dirname(_lmsluice_pkg.__file__), "gate.py"),
+                os.path.join(d, "gate.py"))
             r = subprocess.run([sys.executable, "gate.py"], cwd=d,
                                capture_output=True, text=True, timeout=120)
             self.assertEqual(r.returncode, 0, r.stderr[-800:])

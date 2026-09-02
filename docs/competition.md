@@ -273,7 +273,7 @@ Rows are capabilities; a blank means the tool does not have it.
 | GPUDirect Storage | | | | | ✅ | | | |
 | **returns torch tensors** | ✅ (optional extra) | ✅ | ✅ | ✅ | ✅ | ✅ | n/a | ✅ |
 | vLLM integration | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| pip-installable | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| pip-installable | ✅ (built, unpublished) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **measures the machine** | ✅ | | | | | | adaptive concurrency only | tiering only |
 | **can advise against itself** | ✅ | | | | | | | |
 | **reports predicted vs measured** | ✅ | | | | | | | |

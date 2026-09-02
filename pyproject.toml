@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmsluice"
+# Read from `lmsluice/__init__.py`, which already declares it and is what
+# `lmsluice --version` prints. Two literals would drift, and the first
+# build of this file proved it: the wheel said 0.1.0 and the CLI 0.2.0.
+dynamic = ["version"]
+description = "Decide, per machine, whether decoding a model archive beats reading a plain file — and then do the faster one"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["llm", "model-loading", "compression", "safetensors", "inference"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Archiving :: Compression",
+]
+
+# Deliberately empty, and it is the point rather than an oversight. On the
+# machines this is for -- a phone, an iGPU laptop, a box with no CUDA -- `pip
+# install` is frequently the whole obstacle, and every comparable tool needs a
+# tensor framework before it will import. A test walks the package source to
+# keep it that way.
+dependencies = []
+
+[project.optional-dependencies]
+# Better ratios and a GPU decoder. Without it the stdlib codec still works.
+lmz = ["lmzip>=1.3.0"]
+# `lmsluice.torchadapter`, the only module that imports torch.
+torch = ["torch>=2.0"]
+# Nothing to install: the CUDA path talks to the driver API through ctypes and
+# imports no CUDA package at all. The extra exists so that anyone who types it
+# out of habit gets a working install rather than an error, and so this comment
+# has somewhere to live.
+cuda = []
+all = ["lmzip>=1.3.0", "torch>=2.0"]
+
+[project.scripts]
+lmsluice = "lmsluice.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/yfce/lmsluice/blob/main/README.md"
+
+[tool.setuptools]
+packages = ["lmsluice"]
+
+[tool.setuptools.dynamic]
+version = {attr = "lmsluice.__version__"}
+
+[tool.setuptools.package-data]
+# The device-decode merge kernel and its prebuilt PTX. `merge.cu` is a
+# registered loan (see docs/boundary.md); shipping the PTX means a machine with
+# a driver but no nvcc still gets the device path.
+lmsluice = ["*.cu", "*.ptx"]
