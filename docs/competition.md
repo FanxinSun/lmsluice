@@ -170,10 +170,42 @@ what is unique is deciding per machine whether to use it.
 |---|---|---|---|---|
 | **lmz** | **34.7% saved** (Llama-3.1-8B shards); **64.6%** whole directory with dedup — but see the note below on what that is worth on a Xet-backed hub | **5.95 GB/s** through lmsluice, 8 threads, `CODEC_BF16` at 1 MiB chunks (9800X3D, WSL2, CRC on); 0.97 GB/s for `CODEC_BF16C` at 8 MiB, which is the same library on the same data; 418 GB/s CUDA shared-table (RTX 5080) | **yes** | joint-entropy bound is 35.0% — 0.3 points away |
 | **ZipNN** | 33.6% saved (published, same model) | **1.66 GB/s single-thread**; **up to 80 GB/s @ 16 workers** (Xeon Platinum 8480+, 224 cores, dual NUMA) | "on the way" | integrations shipped: HF `from_pretrained` plugin, safetensors monkey-patch, vLLM, sglang |
-| **ZipLLM** (research) | **54.1%** across 3,048 models / 43.19 TB — tensor-level dedup + **BitX delta** against the base model + zstd | 7.9 GB/s decompress, 5.9 GB/s ingest | no | finds 99.64% of hub models are fine-tunes; argues tensor-boundary dedup needs 923K hashes where CDC needs 520M |
+| **ZipLLM** (research) | **54.1%** across 3,048 models / 43.19 TB — tensor-level dedup + **BitX delta** against the base model + zstd. **On a matched corpus, lmz's coder beats ZipLLM's method by 10.3 points** — see below | 7.9 GB/s decompress, 5.9 GB/s ingest | no | finds 99.64% of hub models are fine-tunes; argues tensor-boundary dedup needs 923K hashes where CDC needs 520M |
 | **DFloat11** | ~30% saved (BF16 → ~11 bits) | GPU kernel, decompresses per transformer block **during inference** | **yes, resident** | 1.9–38.8× throughput vs CPU offload; 5.3–13.17× longer context at fixed VRAM |
 | **DietGPU** (Meta) | generic ANS + float-exponent mode | **250–600 GB/s** float mode (A100) | **yes** | the GPU rANS prior art |
 | **nvCOMP** (NVIDIA) | LZ4 / GDeflate / ANS / Bitcomp | ANS ~480 GB/s end-to-end; LZ4 118–320 GB/s | **yes** | ships with CUDA |
+
+### ZipLLM, measured head-to-head rather than compared across corpora
+
+Qwen2.5-0.5B base plus four full fine-tunes, 4.941 GB BF16, identical pipelines
+differing only in the final coder:
+
+| | saved |
+|---|---|
+| ZipLLM's method (tensor dedup + XOR against base + zstd -1) | **40.82%** |
+| lmz as shipped, files in the order they are named | **41.83%** |
+| lmz's coder in the same pipeline | **51.08%** |
+| lmz as shipped, base ordered first | **51.53%** |
+
+**This is not "lmz beats 54.1%", and it must never be written that way.** On this
+corpus nobody reaches 54.1% — ZipLLM's own method gets 40.8% here. Their 54.1% is
+from 43.19 TB of hub and the two are not comparable. The defensible sentence is
+the one in the table: *on a matched corpus, lmz's coder beats ZipLLM's method by
+10.3 points*.
+
+Three caveats, and the first cuts against us:
+
+- **Dedup found 0.00% of this corpus** — ninety-five tensors matched the base
+  exactly and they were norms and biases totalling 0.1 MB. ZipLLM's hub gets 8.3%
+  from dedup because it is 99.64% fine-tunes with near-duplicate uploads. Dedup
+  is coder-independent and lifts both, so this corpus is *less* favourable to
+  ZipLLM on that component than their own hub is.
+- **One family, four fine-tunes** — a shape more favourable to delta than a hub.
+- **The two as-shipped numbers differ only in filename order**, which is a bug in
+  lmz's choice of delta anchor: it picks by sort order rather than by content.
+  Until that is fixed the as-shipped figure is a function of what the files are
+  called, so 41.83% is what a user gets today and 51.53% is what the same bytes
+  reach when the base happens to sort first. lmz owns that fix.
 
 **What this lane says about lmsluice.**
 
