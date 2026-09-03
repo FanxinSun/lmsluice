@@ -154,19 +154,42 @@ def stage1() -> dict:
     try:
         p = write_fixture(os.path.join(d, "probe.safetensors"), 64 << 20)
         src = FileSource(p)
+        n = os.path.getsize(p)
         try:
             ok, how_un = src.uncache()
             print(f"  uncache(): {ok} — {how_un}")
-            n = os.path.getsize(p)
-            t = time.perf_counter(); src.pread(0, n); cold = n / (time.perf_counter() - t)
+
+            # Read into a buffer that already exists, in chunks, rather than
+            # through `pread`. `pread` allocates a fresh object per call, and on
+            # fast storage that allocation — not the disk — becomes the limit on
+            # BOTH sides, which squashes the very ratio this is trying to read.
+            # An Apple SSD at 5 GB/s and a cached read at 7 differ by 1.3x that
+            # way and by much more when the allocation is taken out.
+            chunk = 8 << 20
+            buf = bytearray(chunk)
+            fd = src._fd                    # the descriptor uncache() acted on
+
+            def sweep() -> float:
+                off, started = 0, time.perf_counter()
+                while off < n:
+                    got = os.preadv(fd, [memoryview(buf)[:min(chunk, n - off)]], off)
+                    if not got:
+                        break
+                    off += got
+                return off / (time.perf_counter() - started)
+
+            cold = sweep()
             ok2, how_re = src.recache()
             print(f"  recache(): {ok2} — {how_re}")
-            src.pread(0, n)                              # prime, untimed
-            t = time.perf_counter(); src.pread(0, n); warm = n / (time.perf_counter() - t)
+            sweep()                                      # prime, untimed
+            warm = sweep()
         finally:
             src.close()
         print(f"  bypassed read {cold/1e9:.2f} GB/s   cached read {warm/1e9:.2f} GB/s"
               f"   ratio {warm/cold:.1f}x")
+        # With the allocation gone the two sides are limited by what they
+        # actually read from, so a real bypass shows a wide gap. 1.5x is kept as
+        # the bar; what changed is that the measurement can now reach it.
         honoured = warm > cold * 1.5
         # Name the mechanism this platform actually used, so the line is not
         # quietly wrong on the box it was developed on.
