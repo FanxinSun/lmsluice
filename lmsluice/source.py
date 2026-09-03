@@ -201,6 +201,35 @@ class FileSource(Source):
         except (ImportError, OSError, ValueError) as exc:
             return False, f"F_NOCACHE unavailable: {exc}"
 
+    def recache(self) -> tuple[bool, str]:
+        """Undo what `uncache` did, where it is a mode rather than an event.
+
+        The two platforms differ in a way that matters and is easy to miss.
+        Linux's `posix_fadvise(DONTNEED)` is an **event**: it drops what is
+        cached and changes nothing about the descriptor, so there is nothing to
+        restore. macOS's `F_NOCACHE` is a **mode**: it is set on the descriptor
+        and every subsequent read on it bypasses the cache -- and, just as
+        importantly, does not populate it.
+
+        Two consequences follow, and both were live before this existed. A
+        "warm" rate measured after `uncache` on macOS is not warm, because the
+        reads that were supposed to warm the cache bypassed it. And a `Source`
+        that was probed and then used to load would keep bypassing the cache
+        for the rest of its life, which is the opposite of what a loader wants
+        -- `pread` is meant to stay buffered, and only the probe needs to see
+        past it.
+        """
+        if getattr(os, "posix_fadvise", None) is not None:
+            return True, "nothing to restore: DONTNEED is an event, not a mode"
+        try:
+            import fcntl
+
+            F_NOCACHE = 48
+            fcntl.fcntl(self._fd, F_NOCACHE, 0)
+            return True, "fcntl(F_NOCACHE, 0)"
+        except (ImportError, OSError, ValueError) as exc:
+            return False, f"could not clear F_NOCACHE: {exc}"
+
     def direct_reader(self):
         """An unbuffered reader for cold measurement, or None.
 

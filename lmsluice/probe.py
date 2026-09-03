@@ -130,6 +130,18 @@ def read_rate(src: Source, *, sample: int = SAMPLE,
             # reported -- and the depth that won is still worth keeping,
             # because the right queue depth does not change with the cache.
             best = max(first, best if best_depth == 1 else first)
+    # Warm, and it takes two steps rather than one. `uncache` on macOS is a
+    # mode on the descriptor, not a one-shot eviction: it has to be cleared, and
+    # then the region has to be read once *untimed* to actually populate the
+    # cache, because every read up to here bypassed it and left it empty. On
+    # Linux the clear is a no-op and the priming read is one extra read of an
+    # already-cached region, so doing it unconditionally costs little and
+    # removes a platform difference that would otherwise report a cold number
+    # as warm on exactly one platform.
+    restore = getattr(src, "recache", None)
+    if restore is not None:
+        restore()
+    _read_at(src, *regions[0], 1)          # prime, untimed
     warm = _read_at(src, *regions[0], 1)
     if direct is not None:
         direct.close()

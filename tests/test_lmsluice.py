@@ -2174,5 +2174,79 @@ class TestVllmLoader(unittest.TestCase):
                .reshape(-1).numpy().tobytes(), self.payload)
 
 
+class TestColdMeasurementIsRestored(unittest.TestCase):
+    """`uncache` is an event on Linux and a mode on macOS, and the probe has to
+    survive both.
+
+    macOS's `F_NOCACHE` is set on the descriptor: every later read bypasses the
+    cache *and does not populate it*. So a "warm" rate measured straight after
+    it is not warm, and a `Source` that was probed keeps bypassing the cache for
+    the rest of its life. Neither shows up on Linux, where `DONTNEED` drops
+    pages once and changes nothing about the descriptor — which is why this is
+    tested by contract rather than by running it.
+    """
+
+    def test_a_file_source_can_restore_caching(self):
+        from lmsluice.source import FileSource
+
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "x.bin")
+            with open(path, "wb") as fh:
+                fh.write(os.urandom(1 << 20))
+            src = FileSource(path)
+            try:
+                self.assertTrue(hasattr(src, "recache"),
+                                "the probe needs a way to undo uncache")
+                ok, how = src.recache()
+                self.assertTrue(ok, how)
+                self.assertTrue(how, "recache must say what it did")
+                # Still readable afterwards, whichever platform this is.
+                self.assertEqual(len(src.pread(0, 4096)), 4096)
+            finally:
+                src.close()
+        finally:
+            import shutil
+
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_the_probe_restores_and_primes_before_timing_warm(self):
+        """Both steps, because clearing the mode is not enough on macOS.
+
+        Every read up to that point bypassed the cache, so the region is not in
+        it. Clearing `F_NOCACHE` and timing the next read would time a second
+        cold read and call it warm. The probe must clear, prime untimed, then
+        time.
+        """
+        from lmsluice import probe
+
+        calls = []
+
+        class FakeSource:
+            name = "/fake/model.bin"
+            size = 8 << 20
+
+            def uncache(self, *a):
+                calls.append("uncache")
+                return True, "fake"
+
+            def recache(self):
+                calls.append("recache")
+                return True, "fake"
+
+            def pread(self, offset, length):
+                calls.append("read")
+                return b"\0" * length
+
+        probe.read_rate(FakeSource(), sample=1 << 20, depths=(1,))
+
+        self.assertIn("recache", calls, "the probe never restored caching")
+        after = calls[calls.index("recache"):]
+        self.assertGreaterEqual(
+            after.count("read"), 2,
+            "after restoring, the probe must prime the cache with an untimed "
+            "read before timing the warm one")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
