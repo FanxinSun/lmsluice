@@ -279,12 +279,20 @@ def _one(path: str, mode: str) -> dict:
     return json.loads(r.stdout)
 
 
-def stage2(plain: str, reps: int) -> None:
+def stage2(paths: list, reps: int) -> None:
+    """One never-before-read copy per reading.
+
+    An earlier version read `copies[0]` every time, which made every reading
+    after the first a warm one — and worse, left that copy cached for stage 3,
+    where it showed up as a plain route running at twice the machine's actual
+    cold rate. A stage that contaminates a later stage is the kind of bug that
+    looks like a result.
+    """
     print("\n== stage 2: this machine's cold storage rate ==")
-    print("  fresh process per read, F_NOCACHE before each")
+    print("  fresh process per read, one unread copy each, F_NOCACHE before each")
     rates = []
-    for i in range(reps):
-        got = _one(plain, "supplied")
+    for i in range(min(reps, len(paths))):
+        got = _one(paths[i], "supplied")
         if "error" in got:
             print(f"  {i}: FAILED {got['error']}"); continue
         rates.append(got["gbps"])
@@ -370,7 +378,7 @@ def main() -> int:
         print("--force given: continuing, and every number below is WARM.")
 
     size = a.size_mb << 20
-    need = size * (2 + a.reps * 2) / 1e9
+    need = size * (2 + a.reps * 2 + 2) / 1e9   # +2 spares for stage 2
     d = tempfile.mkdtemp(prefix="lmsluice-cold-")
     print(f"\n  workspace {d}")
     print(f"  will write about {need:.1f} GB and remove it at the end"
@@ -426,8 +434,14 @@ def main() -> int:
                 copy_uncached(coded, cc)
             copies.append((pc, cc))
 
+        # Stage 2 gets its own copies, never the ones stage 3 will read.
         if a.stage in (0, 2):
-            stage2(copies[0][0], min(a.reps, len(copies)))
+            spare = []
+            for i in range(min(2, a.reps)):
+                sp = os.path.join(d, f"s{i}.safetensors")
+                copy_uncached(plain, sp)
+                spare.append(sp)
+            stage2(spare, len(spare))
         if coded and a.stage in (0, 3):
             print("\n== stage 3 uses one unread copy per measurement ==")
             ps, cs = [], []

@@ -1415,15 +1415,20 @@ here:
 | question | why this box cannot answer it |
 |---|---|
 | the 2-CU adapter's shared-memory **pool per compute unit** | Exposed by no interface that adapter offers: core Vulkan has no such query, and `VK_AMD_shader_core_properties` and `shader_core_properties2` — both present, both queried — carry no LDS field. Obtainable only by running the kernel on the device. |
-| a true **cold storage rate** | Every read here is served by a host cache the guest cannot address or evict — and, as of 2026-09-03, not reliably even when nothing is done differently: the same protocol gave 1.6 GB/s one hour and 5.3 the next. Obtainable only on storage that is not behind such a cache. |
-| whether the coded route pays at a **cold first-touch** link | Downstream of the row above. Its one measurement, 0.94×, is indistinguishable by rate from a warm read plus the allocation it timed. |
+| a true **cold storage rate** *(for this box)* | Every read here is served by a host cache the guest cannot address or evict — and not reliably even when nothing is done differently: the same protocol gave 1.6 GB/s one hour and 5.3 the next. Still open **for this machine**; see below for what was answered elsewhere. |
+| ~~whether the coded route pays at a **cold first-touch** link~~ | **Answered 2026-09-03, on an Apple silicon Mac** where cold reads are obtainable: at a 4.97 GB/s cold link against that machine's 2.21 GB/s decoder it is a **tax, 0.45×**. Not this box's number, but the question behind the row, on hardware where cold is real. |
 
 They bound the same claim from opposite ends — the first sets how fast a small
 iGPU decodes, the others how slow the link it is racing actually is — and the
 gate is the comparison between them. So the one measurement that would most
 change what this project knows is not a better analysis of this machine. It is
-any of these on a different one, and the last two are the *same* measurement on
-storage that is not behind a host cache.
+any of these on a different one.
+
+**One of them has now been taken.** Going to a Mac answered the third row and
+produced something better than the answer: at the *same* link rate the two
+machines reach *opposite* verdicts, because their decoders differ by 2.7×. The
+remaining two are still different-hardware questions, and the Mac did not touch
+them — it has no AMD iGPU, and this box's own cold rate is still unknown.
 
 ### A test that supplies its own observer cannot tell you the observation works
 
@@ -1581,3 +1586,82 @@ anything else derived from a cold protocol that predates `buffer.py` and the
 above is why. It is the same answer as the two open questions already on the
 list: different hardware. Storage not behind a host cache makes cold reads
 obtainable and tells all three of these apart at once.
+
+---
+
+## Apple silicon, and the first genuinely cold measurement — 2026-09-03
+
+M-series Mac, macOS 14.4, arm64, Python 3.14.5, lmz 1.3.0 via `lmzip[zstd]`,
+`CODEC_BF16`. Synthetic BF16 fixture, f = 0.677. Distinct never-before-read
+copies, fresh process per reading, destination supplied and pre-faulted outside
+the timing.
+
+**This is the first machine in this project where a cold read is obtainable.**
+On the development box `posix_fadvise` empties the guest page cache — `mincore`
+confirms 0% residency — and the read still returns at host-cache speed, because
+Windows caches the virtual disk beneath and the guest can neither address nor
+evict it. On bare-metal APFS there is nothing underneath. Verified rather than
+assumed: a file the cache has never held reads at 5.3 GB/s single-threaded
+against 12.7 GB/s once cached, a ratio of 2.4×.
+
+| | GB/s | |
+|---|---|---|
+| cold read, single-threaded sweep | **5.3** | stage 1 |
+| cold read, through the transport | **4.97** | stage 3, mean of two valid pairs |
+| cached read | 12.4–12.9 | the ceiling of the read path |
+| **coded route, cold** | **2.21** | and see below — this is the decoder |
+
+**Verdict: compression is a tax here, 0.45×.** Not a surprise and not a
+disappointment: it is what the gate says should happen when the decoder is
+slower than the link.
+
+### It measures the decoder on Apple silicon, which had never been measured
+
+The link offered `4.97 / 0.677` = **7.3 GB/s** of coded bytes a second, and the
+coded route delivered 2.21. It was therefore not link-limited, so **2.21 GB/s is
+this machine's decode rate** — the first figure for `CODEC_BF16` on Apple
+silicon. The 9800X3D through the same transport does **5.95**, so the decoder is
+**2.7× slower here**.
+
+### The finding that matters: the same link, two machines, opposite verdicts
+
+A 5 GB/s link on the development box, against its 5.95 GB/s decoder, gives
+`min(1/f, 5.95/5.0)` = **1.19×, and compression pays**. The same 5 GB/s link on
+this Mac, against its 2.21 GB/s decoder, gives **0.44×, and compression is a
+tax**. Same ratio, same codec, same transport, same link rate — opposite
+answers, because the machines decode at different speeds.
+
+**That is the whole thesis, confirmed on hardware it was not calibrated on.** A
+table of storage rates cannot decide this, and neither can a rule of thumb: the
+decode side has to be measured on the machine in front of you, which is what
+`probe` exists to do. Until now the decoder had only ever been measured on one
+CPU, and §1's claim that the term is machine-dependent rested on codec choice
+and thread count alone. It now has a cross-machine point: 5.95 against 2.21,
+2.7×, on the same codec at the same settings.
+
+### Three defects in the macOS path, and where each was caught
+
+The README said that path was written and never run. It is now run, and it
+worked — but not before three things were fixed, and *when* each was caught is
+the useful part:
+
+| defect | caught by |
+|---|---|
+| the probe's "warm" rate was measured through a still-open `F_NOCACHE` descriptor, so it was not warm | reading the code before it ran |
+| `F_NOCACHE` was never cleared, so a `Source` that had been probed kept bypassing the cache for the rest of its life — every load after a probe slower, on one platform, for a reason nothing stated | reading the code before it ran |
+| **`F_NOCACHE` declines to populate the cache but does not evict it**, so a fixture that had just been *written* was already resident and no read-side flag could remove it | only by running it |
+
+The third is the one no amount of review would have found, and it is the
+argument for having gone to the hardware. The fix is to set `F_NOCACHE` on the
+descriptor the fixture is *written* through, so the data never enters the cache;
+`sudo purge` is the fallback where that is not possible.
+
+### One measurement discarded, and why
+
+Stage 3's first pair reported the plain route at 11.01 GB/s — more than double
+the other two and above the cold rate stage 1 measured on the same machine.
+Stage 2 had read that copy three times before stage 3 reached it, so it was
+warm. That is a defect in the harness, now fixed: stage 2 takes its own copies
+and never touches the ones stage 3 will read. The two uncontaminated pairs agree
+closely (0.44× and 0.45×) and agree with stage 1's independent cold figure,
+which is why the discard is safe rather than convenient.
