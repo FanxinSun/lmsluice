@@ -1580,14 +1580,25 @@ class TestDestinationBuffer(unittest.TestCase):
         """`strategy()` may not claim a mapping the kernel will not back."""
         from lmsluice import buffer
 
+        import mmap as _mmap
+
         saved_state, saved_probe = buffer._strategy, buffer._thp_mode
         try:
             buffer._strategy = None
             buffer._thp_mode = lambda: "never"
             how, why, floor = buffer.strategy()
             self.assertEqual(how, "bytes")
-            self.assertIn("never", why)
             self.assertEqual(floor, 0)
+            # The reason depends on which check declines first, and that is a
+            # platform fact rather than a preference. Where the mmap constants
+            # exist at all, `strategy()` reaches the THP mode and should name
+            # it; on macOS it stops earlier, at the missing constant, and
+            # naming *that* is the correct answer. Asserting "never" everywhere
+            # asserted a Linux-only path and failed on the first Mac to run it.
+            has_consts = all(hasattr(_mmap, n) for n in
+                             ("MAP_PRIVATE", "MAP_ANONYMOUS", "MADV_HUGEPAGE"))
+            self.assertIn("never" if has_consts else "absent", why)
+            self.assertTrue(why, "the fallback must say why")
             buffer._strategy = ("bytes", "forced", 0)
             self.assertIsInstance(buffer.destination(64 << 20), bytearray)
         finally:

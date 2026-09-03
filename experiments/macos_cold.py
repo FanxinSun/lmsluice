@@ -100,6 +100,48 @@ def _bf16_normal(count: int, seed: int) -> bytes:
     return bytes(out)
 
 
+PURGE = False
+
+
+def _maybe_purge() -> None:
+    """Drop the whole buffer cache, if asked and if the platform has a way.
+
+    macOS `purge` is the only reliable eviction it offers: there is no
+    per-file equivalent of `posix_fadvise(DONTNEED)`, and `F_NOCACHE` governs
+    future access rather than what is already resident. It is coarse — it
+    drops everything, not this file — and it needs a password, which is why it
+    is opt-in rather than the default.
+    """
+    if not PURGE:
+        return
+    try:
+        subprocess.run(["sudo", "purge"], check=False, timeout=120)
+    except Exception:                     # noqa: BLE001 -- never fatal
+        pass
+
+
+def _no_cache(fd: int) -> bool:
+    """Ask macOS not to cache this descriptor's data. No-op elsewhere.
+
+    Used on the descriptor the fixture is *written* through, which is the
+    step that matters. `F_NOCACHE` declines to populate the cache; it does not
+    evict what is already there. A file that has just been written is in the
+    unified buffer cache because of the write, and no amount of read-side
+    `F_NOCACHE` removes it — which is why the first Mac run measured 11.8 GB/s
+    on a "bypassed" read of a 5-7 GB/s SSD and correctly refused to call it
+    cold. Setting it on the writer keeps the data out from the start.
+    """
+    if hasattr(os, "posix_fadvise"):          # Linux: nothing to do here
+        return False
+    try:
+        import fcntl
+
+        fcntl.fcntl(fd, 48, 1)                # F_NOCACHE
+        return True
+    except (ImportError, OSError, ValueError):
+        return False
+
+
 def write_fixture(path: str, size_bytes: int, seed: int = 7) -> str:
     """A safetensors file of BF16 tensors with realistic exponent structure."""
     per = 1 << 22                      # elements per tensor, 8 MiB each
@@ -120,6 +162,7 @@ def write_fixture(path: str, size_bytes: int, seed: int = 7) -> str:
     pad = (8 - (len(blob) % 8)) % 8
     blob += b" " * pad
     with open(path, "wb") as fh:
+        _no_cache(fh.fileno())
         fh.write(struct.pack("<Q", len(blob)))
         fh.write(blob)
         for i in range(len(names)):
@@ -178,6 +221,7 @@ def stage1() -> dict:
                     off += got
                 return off / (time.perf_counter() - started)
 
+            _maybe_purge()
             cold = sweep()
             ok2, how_re = src.recache()
             print(f"  recache(): {ok2} — {how_re}")
@@ -228,6 +272,7 @@ def _one(path: str, mode: str) -> dict:
         "'gbps':m.plain_bytes/el/1e9,'cold_ok':ok,'how':how}))\n"
         "m.close()\n"
     )
+    _maybe_purge()
     r = subprocess.run([sys.executable, "-c", prog], capture_output=True, text=True)
     if r.returncode:
         return {"error": r.stderr.strip()[-300:]}
@@ -282,11 +327,21 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--stage", type=int, default=0, help="run only this stage")
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--purge", action="store_true",
+                    help="run `sudo purge` before each timed read (macOS). "
+                         "Drops the whole unified buffer cache, which is the "
+                         "only reliable eviction macOS offers; asks for your "
+                         "password")
     ap.add_argument("--force", action="store_true",
                     help="run stages 2 and 3 even if the cache "
                          "check fails; results are then warm and "
                          "must be reported as warm")
     a = ap.parse_args()
+    global PURGE
+    PURGE = a.purge
+    if PURGE:
+        print("--purge: `sudo purge` runs before every timed read. It drops "
+              "the whole buffer cache, not just this file.\n")
 
     if sys.platform != "darwin":
         print(f"note: this is {sys.platform}, not darwin. It will run, but the "
@@ -301,8 +356,15 @@ def main() -> int:
               f"stages 2 and 3 would report warm numbers as cold.")
         print("That is itself a result and worth reporting: it is what the "
               "development box does, and the reason this script exists.")
+        if sys.platform == "darwin":
+            print("On macOS this is expected when the file is already cached: "
+                  "F_NOCACHE declines to populate the cache but does not evict "
+                  "what a write already put there.")
+            print("Try --purge, which runs `sudo purge` and drops the whole "
+                  "buffer cache. It is the only reliable eviction macOS offers "
+                  "and it will ask for your password.")
         if not a.force:
-            print("Pass --force to run them anyway; whatever they print is "
+            print("Or pass --force to run them anyway; whatever they print is "
                   "then warm and must be reported as warm.")
             return 1
         print("--force given: continuing, and every number below is WARM.")
@@ -346,14 +408,22 @@ def main() -> int:
 
         # Distinct copies so no read is ever a re-read, which is belt and braces
         # here -- F_NOCACHE should make that unnecessary -- and free insurance.
+        def copy_uncached(src: str, dst: str) -> None:
+            """Copy without either side entering the cache, where that is
+            possible. `shutil.copyfile` caches both."""
+            with open(src, "rb") as i, open(dst, "wb") as o:
+                _no_cache(i.fileno())
+                _no_cache(o.fileno())
+                shutil.copyfileobj(i, o, 8 << 20)
+
         copies = []
         for i in range(a.reps):
             pc = os.path.join(d, f"p{i}.safetensors")
-            shutil.copyfile(plain, pc)
+            copy_uncached(plain, pc)
             cc = None
             if coded:
-                cc = os.path.join(d, f"c{i}.lmsl")
-                shutil.copyfile(coded, cc)
+                cc = os.path.join(d, f"c{i}" + os.path.splitext(coded)[1])
+                copy_uncached(coded, cc)
             copies.append((pc, cc))
 
         if a.stage in (0, 2):
