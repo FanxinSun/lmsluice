@@ -10,8 +10,10 @@ every weight arrives byte-identical.
 
 The decision it makes turns on one comparison — is the decoder faster than the
 link it is feeding from — and the two sides of that vary very differently. A
-decoder varies maybe 3× across CPUs. **The link varies by a factor of a
-hundred.**
+decoder varies by more than a factor of ten once you count what it actually
+depends on — codec choice alone is 6.1× on one CPU, and thread count another 8×.
+**The link varies by a factor of a hundred**, which is still the bigger term and
+still the one that decides.
 
 | link | GB/s | verdict | |
 |---|---|---|---|

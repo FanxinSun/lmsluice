@@ -9,28 +9,51 @@ rather than from intuition, and the uncomfortable conclusions are kept.*
 The gate is `decode > link`. Both terms vary, but they vary by very different
 amounts across the machines this will run on:
 
-- the **decoder** varies maybe 3× across CPUs, and is ~1 GB/s on a good one;
+- the **decoder** varies by more than this section used to claim. "Maybe 3×
+  across CPUs" was wrong: **codec choice alone is 6.1× on one CPU** (`CODEC_BF16`
+  against `CODEC_BF16C` on the same library, same data), and thread count adds
+  another 8× on top. The honest statement is that the decode term is
+  codec-and-thread dependent over more than an order of magnitude, and the
+  figure to gate with is the one measured through the transport that will
+  actually do the work: **5.95 GB/s** here (`CODEC_BF16`, 1 MiB chunks, 8
+  threads, 9800X3D, WSL2, CRC on). The 8.29 GB/s at 16 threads is decode-only
+  from RAM and is a bound, not a crossover.
 - the **link** varies by a **factor of 100** — 12 GB/s on a Gen5 NVMe, 6 on this
   box's Gen4, 0.55 on a SATA SSD, 0.3 on eMMC, 0.26 on a 9p mount, 0.125 on a
   gigabit network, less on anything metered.
 
 So the product's value is very nearly a function of one variable: **how slow the
-link is.** Measured on this machine today:
+link is.** That conclusion survives the correction; what changes is where the
+line falls, and it moves in our favour.
 
-| link | GB/s | gate vs 1.05 GB/s CPU decode | verdict |
-|---|---|---|---|
-| ext4 on NVMe, host-cached | 6.2 | 0.17× | **tax** |
-| ext4 on NVMe, first touch | 2.4 | 0.44× | tax |
-| UFS 4.0 (phone) | 4.0 | 0.26× | tax |
-| **9p mount to the Windows host** | **0.26** | **4.1×** | **pays** |
-| **SATA SSD** | 0.55 | 1.9× | **pays, 1.49× capped** |
-| **eMMC / SD / USB** | 0.30 | 3.5× | **pays, capped** |
-| **1 Gb/s network** | 0.125 | 8.4× | **pays, capped** |
+Gate is `decode / link` at 5.95 GB/s; the speedup is `min(1/f, gate)` and cannot
+exceed **1.49×**, which is all f = 0.673 can buy.
 
-**The market is every machine that is not reading from a fast local NVMe.** That
-is most laptops, every phone, every network mount, every container pulling from
-object storage, and *every download that has ever happened*. The one case where
-this project has nothing to offer is the case the development box happens to be.
+| link | GB/s | source | gate | speedup | verdict |
+|---|---|---|---|---|---|
+| ext4 on NVMe, host-cached | 6.2 | measured — but this is the *host* cache, not storage | 0.96× | 0.74× **measured** | **tax** |
+| ext4 on NVMe, first touch | 2.4 | measured, and an upper bound on cold | 2.48× | 1.49× *projected* | **pays, capped** |
+| UFS 4.0 (phone) | 4.0 | spec | 1.49× | 1.49× *projected* | **pays, at the cap** |
+| **9p mount to the Windows host** | **0.26** | measured | 22.9× | **1.45× measured** | **pays** |
+| **SATA SSD** | 0.55 | spec | 10.8× | 1.49× *projected* | **pays, capped** |
+| **eMMC / SD / USB** | 0.30 | spec | 19.8× | 1.49× *projected* | **pays, capped** |
+| **1 Gb/s network** | 0.125 | spec | 47.6× | 1.49× *projected* | **pays, capped** |
+
+**Two rows flipped when the decoder figure was corrected**: first-touch NVMe and
+phone-class UFS were both marked "tax" against the retired 1.05 GB/s and both
+pay against 5.95. Only the host-cache-warm row still loses, and that row is not
+a storage measurement at all — it is RAM, which no CPU decoder competes with.
+
+**The market is every machine that is not reading out of a warm cache.** That is
+most laptops, every phone, every network mount, every container pulling from
+object storage, and *every download that has ever happened*.
+
+**And that market now has a second reason that needs no archive at all.** §4
+records it: on a high-latency mount the plain-file route through this transport
+is worth **2.62×** over `safetensors`' mmap on the *same bytes*, before any
+compression enters. The table above prices the codec; the transport is a
+separate and larger win on the same machines, and it asks nothing of the supply
+side.
 
 ## 2. The uncomfortable consequence
 
@@ -70,7 +93,7 @@ in §1:
 | | |
 |---|---|
 | hub or object-store link | 10–100 MB/s |
-| gate against a 1.05 GB/s CPU decoder | **10–105×** |
+| gate against a **5.95 GB/s** decoder, measured through the transport | **60–595×** |
 | ceiling, at lmz's shard ratio (34.7%) | 1.53× |
 | ceiling, at its **directory** ratio (64.6%) | **2.82×** |
 
@@ -186,7 +209,7 @@ on. The short form:
 | CoreWeave `tensorizer`, Run:ai Model Streamer, SageMaker Fast Model Loader | object storage → GPU cold start | native code, S3-native, wired into vLLM. They own it — **and it is worth less than it looks**: model loading is 7–10% of vLLM startup on fast storage |
 | memory snapshots (Modal, Cerebrium) | the same cold start, without loading | the lane's endgame is no loader at all. A second reason not to fight there |
 | `hf_xet` (`hf_transfer` is deprecated) | download acceleration | **chunk-level dedup**, not just parallel ranges — it already takes part of the download win, and CDC dedup **conflicts** with shipping entropy-coded bytes. Unpriced |
-| `zipnn` | model compression | lmz leads on ratio by 1.1 points (34.7% vs 33.6%) against a 35.0% ceiling — real, and not a moat. ZipNN publishes **1.66 GB/s single-threaded** against our measured 0.39–0.48; not like-for-like, and worth measuring here |
+| `zipnn` | model compression | lmz leads on ratio by 1.1 points (34.7% vs 33.6%) against a 35.0% ceiling — real, and not a moat. ZipNN publishes **1.66 GB/s single-threaded** (Xeon 8480+, 224 cores) against our **0.95** with CRC on / **1.09** with it off per thread — about 1.5–1.75× on a different CPU, not the 3.5× this row used to imply. Still not like-for-like |
 | `ZipLLM` (research) | hub-scale dedup + delta | 54.1% across 43 TB, because 99.64% of hub models are fine-tunes. This is our Phase 3, published first by someone else |
 | `DietGPU`, `nvCOMP` | GPU entropy decode | 250–600 GB/s and ~480 GB/s bracket lmz's 418. GPU decode is a commodity |
 
@@ -195,7 +218,9 @@ compression is better. We measure the machine and sometimes say no. That is a
 real differentiator and it is shipped — with one honest amendment, that
 filesystems have made a *ratio*-based version of this call for decades
 (ZFS/LZ4 early abort). Nobody makes the **rate** call, which is the one that
-can say *"your archive costs you 6× on load time"*.
+can say *"on this machine your archive loads at 0.74× the speed of the plain
+file"* — measured warm on this box, against 0.95× predicted, with about 20%
+unaccounted and being chased.
 
 **Distance to someone actually using it**, honestly:
 
@@ -241,7 +266,8 @@ phases below.
 ### Phase A0 — a codec that needs nothing installed *(§4b)*
 
 Python 3.14 ships zstd in the standard library. Measured here on real BF16
-weights: **21.1% saved, 0.59–0.71 GB/s decode single-threaded** against lmz's
+weights: **21.1% saved, 0.77 GB/s decode single-threaded** and 1.69 at 8–16
+threads where it stops scaling, against lmz's
 32.9% and ~1.05 — so a stdlib codec captures **1.27× of the available 1.49×**,
 about 85% of the win, with **no dependency at all**. It clears the gate
 comfortably everywhere the gate matters: 2.3× on a 0.26 GB/s mount, 4.7× on a

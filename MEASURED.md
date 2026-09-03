@@ -1384,3 +1384,44 @@ reading vLLM's released source showed the timer **did not exist** (the counters
 live in `DefaultModelLoader`, not `BaseModelLoader`), and running a real install
 showed that once it existed it was **invisible**. Neither stage alone would have
 found both, and the cheap stage came first.
+
+---
+
+## Retired figures — 2026-09-03
+
+Every number below appeared in this repository's documents and is superseded.
+It is kept as a list so that a reader meeting an old figure in a commit
+message, a handover or someone's notes can look it up, and so the next sweep
+greps one table instead of rediscovering the set.
+
+**Why this exists.** Three superseded figures were found in three separate
+places on one day, each fixed where it was noticed and none propagated. Fixing
+them one at a time as they surface does not converge; a register does.
+
+| retired | why it was wrong | replaced by |
+|---|---|---|
+| lmz decodes at **~1.05 GB/s** (also 1.03–1.07) | `CODEC_BF16C` at 8 MiB presented as lmz's rate | **5.95 GB/s** through the transport (`CODEC_BF16`, 1 MiB, 8T); **8.29** decode-only from RAM at 16T — a bound, not a crossover |
+| **0.39–0.48 GB/s** single-threaded | same codec | **0.95** CRC on / **1.09** CRC off, per thread |
+| crossover at **~1 GB/s** of storage | derived from 1.05 | **~5.95 GB/s of link** |
+| **"costs you 6× on load time"**, and 0.17× / 0.09× | fastest plain read (host-cache-warm) against slowest coded (BF16C) | **0.74×** warm NVMe measured, against 0.95× predicted; ~20% unaccounted |
+| **0.94× break-even** | earlier cold run with the destination allocation inside the timing | 0.74× is the front-page figure; 0.94× only with its conditions stated |
+| stdlib zstd **0.59–0.71 GB/s** | earlier measurement | **0.77** at 1T, **1.69** at 8–16T, flat above that |
+| "the decoder varies maybe **3×** across CPUs" | codec choice alone is 6.1× on one CPU; threads add ~8× | codec-and-thread dependent over more than an order of magnitude; gate with the through-transport figure |
+| `hf_transfer` — "parallel ranges, no compression" | deprecated; the env var is a no-op | `hf_xet`: CDC at ~64 KB, adaptive 1→64 streams, chunk dedup |
+| "entropy-coded bytes do not chunk-dedup" | false for shape-preserving edits | coded chunks dedup 1:1 for aligned edits; scattered edits amplified by (coded ÷ CDC) chunk size, which is a dial |
+| "lmz beats ZipLLM" / any **> 54.1%** | different corpora | matched corpus: lmz's coder +10.3 points (51.08% vs 40.82%); as shipped 41.83% today, 51.53% once the anchor bug is fixed |
+
+### One figure the sweep was told to retire and did not
+
+**The 9p `1.45×` stands.** It was listed for retirement on the grounds that its
+archive "was very likely `CODEC_BF16C`". It was not: that section states its own
+conditions — *"1 MiB chunks, so every chunk is GPU-readable `CODEC_BF16`"* —
+cache dropped before every run, five runs, median, byte-identical, reaching 97%
+of the 1.49× the ratio allows.
+
+It is also not superseded by the vLLM 3.60×, because they measure different
+things. 1.45× is coded against plain **through the same transport**: the codec
+alone. 3.60× is our coded route against *vLLM's* default loader: codec **and**
+reader. The figure that corresponds to 1.45× is the vLLM decomposition's codec
+term, **1.38×** — two harnesses, two link types, a week apart, 1.45 and 1.38.
+That is a cross-check, and it is worth more than either number alone.

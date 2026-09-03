@@ -139,6 +139,13 @@ desktop's answer, not the curve's. Recomputed against `gate.py`'s storage axis
 with the measured 1.05 GB/s CPU decode and f = 0.671, the crossover is ~1 GB/s
 of storage and saturation at 0.70:
 
+> **Retired figures, kept because this is a record of what was believed at the
+> time.** 1.05 GB/s was `CODEC_BF16C` at 8 MiB chunks presented as lmz's rate;
+> the field-split codec at 1 MiB does **5.95 GB/s** through the transport, which
+> moves the crossover from ~1 GB/s of storage to ~5.95. The table below is
+> therefore too pessimistic in every row. See "Retired figures" in
+> `MEASURED.md`; the corrected table is `docs/strategy.md` §1.
+
 | storage | GB/s | verdict, CPU decoder alone |
 |---|---|---|
 | NVMe Gen5 | 12.0 | tax, 0.09× |
