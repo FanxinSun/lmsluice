@@ -1354,3 +1354,33 @@ iGPU decodes, the second how slow the link it is racing actually is — and the
 gate is the comparison between them. So the one measurement that would most
 change what this project knows is not a better analysis of this machine. It is
 either of these on a different one.
+
+### A test that supplies its own observer cannot tell you the observation works
+
+Added 2026-09-03, from verifying the vLLM loader against a real install.
+
+The loader emits `"Loading weights took %.2f seconds"` so that
+`--load-format lmsluice` can be compared against vLLM's default on vLLM's own
+metric. A unit test asserted the record was logged, and passed. In a real vLLM
+process the line **never appeared**: vLLM's `dictConfig` attaches its handler to
+the logger named `vllm` and leaves the root logger alone, so a logger called
+`lmsluice` had no handler and its INFO records went nowhere.
+
+The module was correct. The test was correct. The observation was impossible.
+`unittest.assertLogs` works by attaching *its own* handler to the logger under
+test, so it proves a record was emitted and says nothing about whether anything
+downstream would ever receive it. Every test of the form "assert we logged X"
+has this shape.
+
+**The general form: when the host owns the logging tree — a plugin inside a
+server, an extension inside an application, anything loaded rather than run —
+being visible is a property of the integration and cannot be tested from
+inside.** It needs the host. Here the fix was to name the logger `vllm.lmsluice`
+so it inherits the handler vLLM configured, which is what vLLM's own modules get
+by passing `__name__`.
+
+Worth pairing with what the two verification stages each caught on this one line:
+reading vLLM's released source showed the timer **did not exist** (the counters
+live in `DefaultModelLoader`, not `BaseModelLoader`), and running a real install
+showed that once it existed it was **invisible**. Neither stage alone would have
+found both, and the cheap stage came first.

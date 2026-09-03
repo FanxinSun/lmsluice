@@ -138,12 +138,40 @@ because fewer bytes have to arrive before the first layer is complete.
 `lmsluice plan ./model` costs nothing, changes no pipeline, and answers a
 question nobody else can answer: **"on this machine, is your compressed model
 helping or hurting, and by how much?"** The answer is frequently surprising and
-occasionally embarrassing — on this box it is *"your archive costs you 6× on load
-time"*.
+occasionally embarrassing — on this box, warm, it is *"your archive loads at
+0.74× the speed of the plain file"*. (It used to say 6× here; that figure paired
+the fastest plain read with the slowest coded one and is retired.)
 
 A free diagnostic that tells someone something true and surprising about their
 own machine is how this gets adopted. The transport is what they use once they
 believe the number. **Lead with the router, not the pipeline.**
+
+### The transport is the first win, and compression is the second
+
+**On a slow link, the plain-file route is already a multiple over
+`safetensors`' mmap, with no archive involved at all.** Measured inside vLLM
+0.28.0 on a 9p mount, cold by distinct never-before-read copies, n=5, using
+vLLM's own reported weight-loading time: reading the *same* plain safetensors
+file through this package's transport instead of vLLM's default loader is worth
+**2.62×** [2.45–2.90]. Parallel `pread`s against mmap page-faults, same bytes,
+no codec, no lmz, no supply side.
+
+Compression then adds **1.38×** [1.34–1.55] on top — against a ceiling of 1.48×,
+which is all that 0.674-of-the-bytes can arithmetically buy, so the decoder is
+keeping up and nearly the whole ratio arrives as speed. The two compose to the
+3.60× measured end to end.
+
+**This reorders the pitch.** The compressed archive needs somebody to build one:
+a supply side, a format, a dependency, a reason to trust it. The transport needs
+none of that — it is a faster way to read the file the user already has, and it
+is the larger of the two effects on exactly the machines §1 says the value lives
+on. That makes the plain-file path the thing to lead with and the archive the
+upgrade, not the other way round.
+
+It is also the second time in a week that the biggest available win turned out
+to be the transport rather than the codec; the destination-buffer allocation
+finding (`MEASURED.md`, "the destination buffer costs more than the transport")
+was the first, and it was worth 2.4× for a buffer.
 
 ## 4b. Where this stands against what people already use
 
