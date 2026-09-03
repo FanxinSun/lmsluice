@@ -170,7 +170,7 @@ what is unique is deciding per machine whether to use it.
 |---|---|---|---|---|
 | **lmz** | **34.7% saved** (Llama-3.1-8B shards); **64.6%** whole directory with dedup — but see the note below on what that is worth on a Xet-backed hub | **5.95 GB/s** through lmsluice, 8 threads, `CODEC_BF16` at 1 MiB chunks (9800X3D, WSL2, CRC on); 0.97 GB/s for `CODEC_BF16C` at 8 MiB, which is the same library on the same data; 418 GB/s CUDA shared-table (RTX 5080) | **yes** | joint-entropy bound is 35.0% — 0.3 points away |
 | **ZipNN** | 33.6% saved (published, same model) | **1.66 GB/s single-thread**; **up to 80 GB/s @ 16 workers** (Xeon Platinum 8480+, 224 cores, dual NUMA) | "on the way" | integrations shipped: HF `from_pretrained` plugin, safetensors monkey-patch, vLLM, sglang |
-| **ZipLLM** (research) | **54.1%** across 3,048 models / 43.19 TB — tensor-level dedup + **BitX delta** against the base model + zstd. **On a matched corpus, lmz as shipped saves 51.55% against 42.4% for ZipLLM's method at its strongest setting (zstd -19) — 9.2 points, while running 37× faster than that baseline**; 10.7 points against its zstd -1 default. See below | 7.9 GB/s decompress, 5.9 GB/s ingest | no | finds 99.64% of hub models are fine-tunes; argues tensor-boundary dedup needs 923K hashes where CDC needs 520M |
+| **ZipLLM** (research) | **54.1%** across 3,048 models / 43.19 TB — tensor-level dedup + **BitX delta** against the base model + zstd. **On a matched corpus, lmz as shipped saves 51.55%: 9.2 points over ZipLLM's method at its strongest setting, zstd -19, which takes about 40× longer (1143 s against 28 s, same single-threaded harness); and 10.7 points over its zstd -1 default at equal speed (27 s against 28 s)**. See below | 7.9 GB/s decompress, 5.9 GB/s ingest | no | finds 99.64% of hub models are fine-tunes; argues tensor-boundary dedup needs 923K hashes where CDC needs 520M |
 | **DFloat11** | ~30% saved (BF16 → ~11 bits) | GPU kernel, decompresses per transformer block **during inference** | **yes, resident** | 1.9–38.8× throughput vs CPU offload; 5.3–13.17× longer context at fixed VRAM |
 | **DietGPU** (Meta) | generic ANS + float-exponent mode | **250–600 GB/s** float mode (A100) | **yes** | the GPU rANS prior art |
 | **nvCOMP** (NVIDIA) | LZ4 / GDeflate / ANS / Bitcomp | ANS ~480 GB/s end-to-end; LZ4 118–320 GB/s | **yes** | ships with CUDA |
@@ -187,23 +187,32 @@ differing only in the final coder:
 | lmz's coder in the same pipeline | 51.08% |
 | **lmz as shipped** | **51.55%** |
 
-zstd -19 buys them 1.5 points over -1 for 37× the wall clock, so the gap is the
-coder rather than the effort spent on it.
+zstd -19 buys them 1.5 points over -1 and costs about **forty times** as long
+(1143 s against 27 s), so the gap is the coder rather than the effort spent on
+it. Each coder was timed on its own in one single-threaded harness that does
+nothing but code; the four rows above are comparable to each other and to
+nothing else.
 
 **This is not "lmz beats 54.1%", and it must never be written that way.** On this
 corpus nobody reaches 54.1% — ZipLLM's own method gets 40.8% here. Their 54.1% is
 from 43.19 TB of hub and the two are not comparable. The defensible sentence is
 the one in the table, and it is quoted against their **strongest** setting
 rather than their default: *on a matched corpus lmz as shipped saves 51.55%
-against 42.4% for ZipLLM's method at zstd -19 — 9.2 points — while taking 1/37th
-of that baseline's wall clock*. Against their zstd -1 default it is 10.7 points.
+against 42.4% for ZipLLM's method at zstd -19 — 9.2 points — and that setting
+takes about **40× longer**, 1143 s against 28 s in the same single-threaded
+harness*. Against their zstd -1 default it is **10.7 points at equal speed**:
+27 s against 28 s, which is parity and not an advantage.
 
-Leading with the smaller number is deliberate. `-19` is the strongest
+**The speed claim belongs only to the -19 comparison and must not drift onto the
+other.** Against their default lmz wins on ratio alone, by a wider margin, at
+the same cost. Against their strongest setting it wins by less and is forty
+times cheaper. Those are two different sentences and each is true only of its
+own row.
+
+Leading with the smaller number is deliberate: `-19` is the strongest
 configuration of the thing being beaten, and quoting only the 10.7 would mean
-comparing against the weaker one — which invites the obvious question and has no
-good answer to it. The 9.2 is also the better claim: winning on ratio *while*
-being 37× faster than the baseline is a stronger statement than winning by 1.5
-more points against a configuration nobody would run for the ratio.
+comparing against the weaker one, which invites the obvious question and has no
+good answer to it.
 
 Three caveats, and the first cuts against us:
 
