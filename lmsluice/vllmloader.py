@@ -60,7 +60,32 @@ from vllm.model_executor.model_loader import (  # noqa: F401 -- vLLM-only import
     register_model_loader,
 )
 
-log = logging.getLogger("lmsluice")
+def _logger():
+    """vLLM's logger where there is one, the standard library otherwise.
+
+    Not cosmetic. vLLM configures handlers on its own logger namespace and
+    leaves the root logger at WARNING, so a plain `logging.getLogger("lmsluice")`
+    emits INFO records that go nowhere -- which was true of the weight-loading
+    line this module exists to make comparable until it was run for real and
+    the line was missing from the log. Going through `init_logger` puts our
+    messages in the same stream and the same format as vLLM's own, which is
+    what lets the two load formats be compared by reading one log.
+    """
+    try:
+        from vllm.logger import init_logger
+
+        # Named UNDER vLLM's namespace on purpose. vLLM's dictConfig attaches
+        # its handler to the logger called "vllm" and leaves the root logger
+        # alone, so a logger named "lmsluice" has no handler and its INFO
+        # records are discarded. Its own modules pass `__name__`, which always
+        # begins "vllm."; matching that is what makes our line appear in the
+        # same stream, in the same format, beside the default loader's.
+        return init_logger("vllm.lmsluice")
+    except Exception:               # noqa: BLE001 -- a logger is never fatal
+        return logging.getLogger("lmsluice")
+
+
+log = _logger()
 
 # Containers this loader will read, in the order it prefers them. A coded
 # archive first, because selecting this loader is a request to use one; the
