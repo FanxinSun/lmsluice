@@ -291,6 +291,11 @@ staging windows cut on block boundaries:
 Every route verified **SHA-256 identical** to the source checkpoint after
 copying back out of VRAM.
 
+*The 1.05 GB/s prediction is a retired figure and is kept because this is a
+record of a prediction against its own outcome. It was `CODEC_BF16C`'s rate;
+the archive here is an 8 MiB-chunk one, so the prediction was right about
+**this** archive and wrong as a statement about lmz. See "Retired figures".*
+
 ### The first place the plan is materially wrong, and why
 
 The ratio of coded to plain into VRAM was predicted at 0.35× and measured at
