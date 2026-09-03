@@ -64,6 +64,20 @@ phone-class UFS were both marked "tax" against the retired 1.05 GB/s. UFS now
 pays at the cap; first-touch NVMe is unsettled, above. Only the host-cache-warm row still loses, and that row is not
 a storage measurement at all — it is RAM, which no CPU decoder competes with.
 
+**The table above is one machine's decoder against many links, and that is now
+demonstrably not enough.** Measured on an Apple silicon Mac on 2026-09-03, cold,
+`CODEC_BF16`, same transport: the decoder does **2.21 GB/s** there against
+**5.95** here — 2.7× apart on the same codec at the same settings. So a 5 GB/s
+link *pays at 1.19× on this box and taxes at 0.44× on that Mac*. Same ratio,
+same codec, same link rate, opposite verdicts, because the machines decode at
+different speeds.
+
+That is the argument for the whole product in one line, and it is now measured
+rather than asserted: **the decode side has to be measured on the machine in
+front of you.** A table of storage rates cannot decide it and neither can a rule
+of thumb — which is what `lmsluice probe` is for, and why §4 leads with the
+diagnostic rather than the pipeline.
+
 **The market is every machine that is not reading out of a warm cache.** That is
 most laptops, every phone, every network mount, every container pulling from
 object storage, and *every download that has ever happened*.
