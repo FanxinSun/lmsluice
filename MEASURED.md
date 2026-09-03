@@ -1344,6 +1344,39 @@ error **in this project's favour**. That is the pattern worth internalising: a
 number that flatters the thing you are building does not feel like a bug, so the
 arithmetic ceiling has to do the work that suspicion would otherwise do.
 
+### Checking where a number came from is not checking the number
+
+Added 2026-09-03, after publishing a wrong one while being careful about it.
+
+This file said zstd -19 costs **37×** the wall clock of the run it is compared
+against. It does not; it costs about **40×**. The 37 was one run's total divided
+by another's, and neither run had coded only the level it was credited with —
+one computed zstd -1, -3 and lmz together, the other computed -19, -3 and lmz.
+A total divided by a different total is a ratio of nothing in particular.
+
+The instructive part is the near-miss. When that figure was last touched, the
+absolute seconds beside it were *correctly* rejected: they belonged to a
+different row of the source table than the one being cited, and the ratio was
+used instead precisely because it was the sourced quantity. That was careful,
+it was right about the rows, and it shipped the wrong number anyway.
+
+**Provenance and recomputation are different checks and only the second catches
+this.** Provenance asks *which row does this figure belong to* — it protects
+against attributing a real measurement to the wrong thing. Recomputation asks
+*what was this figure computed from, and does it come out the same* — it is the
+only one that catches a quantity that was never measured, only derived, and
+derived wrongly.
+
+So for any figure that is a **ratio, a percentage, a speedup or a saving** —
+anything that is a division rather than a reading — the check is not "where did
+this come from" but "what are the two numbers, and are they the same kind of
+thing measured the same way". Four of this week's corrections were exactly that
+shape: two totals that were not comparable, a warm rate compared against a cold
+one, an allocation counted on one side, and a coder timed alongside two others.
+
+The habit that keeps working is reading the source table. The habit that failed
+is reasoning about which row a figure belongs to without recomputing it.
+
 ### A mode set on a descriptor outlives the measurement that set it
 
 Added 2026-09-03, from reviewing the macOS path before it had ever run.
