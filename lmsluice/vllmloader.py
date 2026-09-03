@@ -32,6 +32,17 @@ sources where the arithmetic goes the other way: a slow disk, a network mount, a
 download, a phone. Choosing this loader on a Gen5 NVMe and expecting a win is
 choosing it for the wrong machine, and it will say so rather than pretend.
 
+**A failed plugin does not take vLLM down.** `load_plugins_by_group` wraps each
+`plugin.load()` in `try/except Exception` and calls `logger.exception`, so a
+module that raises at import is logged and skipped -- the server starts, and
+`--load-format lmsluice` then fails with "not supported" rather than crashing
+the engine. Checked against vLLM 0.28.0's own source, because the opposite had
+been asserted and it would have changed how defensively this module is written.
+
+**`VLLM_PLUGINS` can exclude it.** When that variable is set, vLLM loads only
+the plugins it names, so a user who has narrowed it will not get this loader
+however it is installed.
+
 **It does not speak the Hub.** `model_config.model` must name something on this
 filesystem. lmsluice has no S3, no GCS, no Azure and no authentication -- a gap
 `docs/competition.md` §7 records -- so a repository id is refused with that
@@ -42,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from vllm.model_executor.model_loader import (  # noqa: F401 -- vLLM-only import
     BaseModelLoader,
@@ -106,8 +118,28 @@ class LmsluiceModelLoader(BaseModelLoader):
             f"speaks object storage.")
 
     def load_weights(self, model, model_config) -> None:
-        """Hand vLLM a generator, one window at a time."""
+        """Hand vLLM a generator, one window at a time -- and time it the way
+        vLLM times its own.
+
+        The timing is not decoration. vLLM's weight-loading duration is emitted
+        by `DefaultModelLoader`, which owns the counters and the
+        `"Loading weights took %.2f seconds"` line; `BaseModelLoader` has
+        neither. A loader that subclasses the base directly -- this one --
+        therefore reports *nothing*, and any comparison of `--load-format
+        lmsluice` against the default on vLLM's own metric would have had a
+        number on one side and silence on the other.
+
+        So the same line is emitted here, with the same text and the same
+        units, and it measures the same span: from just before the weights are
+        pulled to just after the model has taken them. That is what makes the
+        two load formats comparable on the figure that matters, rather than on
+        wall-clock startup -- which is dominated by compilation, where model
+        loading is 7-10% of the total (`docs/competition.md` §2).
+        """
+        started = time.perf_counter()
         model.load_weights(self._weights(model_config))
+        self.weight_load_seconds = time.perf_counter() - started
+        log.info("Loading weights took %.2f seconds", self.weight_load_seconds)
 
     def _weights(self, model_config):
         from .torchadapter import stream_tensors

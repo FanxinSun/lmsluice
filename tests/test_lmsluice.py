@@ -2111,6 +2111,34 @@ class TestVllmLoader(unittest.TestCase):
         self.assertEqual([os.path.basename(f) for f in got], ["model.lmsl"])
 
     @needs_torch
+    def test_it_reports_a_weight_loading_time_like_vllm_does(self):
+        """vLLM's own timing line comes from DefaultModelLoader, not the base.
+
+        A loader subclassing BaseModelLoader directly inherits no counters and
+        emits nothing, so comparing this against the default loader on vLLM's
+        reported weight-loading time would have had a figure on one side and
+        silence on the other. Verified against vLLM 0.28.0's released source.
+        """
+        self._stub_vllm()
+        mod = self._load_module()
+
+        class Cfg:
+            model = self.dir
+
+        class FakeModel:
+            def load_weights(self, weights):
+                for _ in weights:
+                    pass
+
+        loader = mod.LmsluiceModelLoader(load_config=None)
+        with self.assertLogs("lmsluice", level="INFO") as caught:
+            loader.load_weights(FakeModel(), Cfg())
+        self.assertTrue(
+            any("Loading weights took" in line for line in caught.output),
+            f"no comparable timing line was emitted: {caught.output}")
+        self.assertGreaterEqual(loader.weight_load_seconds, 0.0)
+
+    @needs_torch
     def test_load_weights_hands_the_model_a_generator_of_pairs(self):
         """The contract that matters: a generator, not a dict.
 
