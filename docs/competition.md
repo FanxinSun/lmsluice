@@ -272,7 +272,7 @@ Rows are capabilities; a blank means the tool does not have it.
 | decode on GPU | ✅ (lmz CUDA) | | | | n/a | | | |
 | GPUDirect Storage | | | | | ✅ | | | |
 | **returns torch tensors** | ✅ (optional extra) | ✅ | ✅ | ✅ | ✅ | ✅ | n/a | ✅ |
-| vLLM integration | ✅ (`--load-format lmsluice`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| vLLM integration | ✅ (`--load-format lmsluice`, run-verified) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | pip-installable | ✅ (built, unpublished) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **measures the machine** | ✅ | | | | | | adaptive concurrency only | tiering only |
 | **can advise against itself** | ✅ | | | | | | | |

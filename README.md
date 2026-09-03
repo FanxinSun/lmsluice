@@ -555,10 +555,31 @@ Stated plainly, because a page that lists only what works is not a description.
   nothing until it was given one. Comparing the two load formats on vLLM's own
   metric would have had a figure on one side and silence on the other.
 
-  **Still not claimed: that vLLM runs it.** That needs vLLM installed — several
-  gigabytes on a link the standing rules call possibly metered — and it has not
-  been. On a fast local disk it will read the plain file and decline to help,
-  which is the gate working rather than the loader failing.
+  **Verified against a real vLLM 0.28.0 install**, not only against its source.
+  `get_model_loader` returns the class through vLLM's own plugin machinery, and
+  vLLM logs `Registered model loader … with load format lmsluice` itself. On a
+  1.87 GB BF16 checkpoint at temperature 0, three runs generate **identical
+  token ids**: vLLM's own loader on the plain file, ours on the plain file, and
+  **ours on the compressed archive**.
+
+  **Cold, on a slow mount, it is 3.60× faster** than vLLM's default loader
+  (median, n=5, distinct never-before-read copies, vLLM's own reported
+  weight-loading time). That figure is compound and this page will not quote it
+  bare, because 3.60 exceeds the 1.48× that 0.674-of-the-bytes can buy. A third
+  arm separates it: **2.62× is the transport** — parallel reads against mmap
+  page-faults on a high-latency mount — and **1.38× is the compression**, just
+  under its own ceiling, which is the good case because it means the decoder
+  keeps up.
+
+  Warm on local NVMe the order reverses: vLLM's loader 0.20 s against our 2.90 s
+  on the archive. That is the gate's prediction, measured inside an inference
+  server rather than argued — warm, the link is RAM and no CPU decoder competes.
+
+  Two flags are needed to run vLLM on WSL2 at all, neither ours:
+  `VLLM_WSL2_ENABLE_PIN_MEMORY=1` (vLLM disables pinned memory there by default,
+  and the engine dies with "UVA is not available" without it) and
+  `VLLM_USE_FLASHINFER_SAMPLER=0` (flashinfer JITs a sampling kernel and its
+  arch check rejects an sm_120 card).
 - **It does not speak object storage.** Plain HTTP with range requests, no S3,
   GCS or Azure, no auth. Which is awkward, because the download is the case with
   the best arithmetic in this repository.
