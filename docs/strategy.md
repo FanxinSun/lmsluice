@@ -39,17 +39,25 @@ exceed **1.49×**, which is all f = 0.673 can buy.
 | **eMMC / SD / USB** | 0.30 | spec | 19.8× | 1.49× *projected* | **pays, capped** |
 | **1 Gb/s network** | 0.125 | spec | 47.6× | 1.49× *projected* | **pays, capped** |
 
-**The first-touch row is the one claim here that is not safe yet, and it is the
-project's own rule that says so.** The arithmetic gives 1.49×, but the only cold
-end-to-end measurement near that link rate came out at **0.94×** — n=7, plain
-1.94 GB/s, and taken with the destination allocation *inside* the timing, which
-is worth up to 0.55 s on this fixture and is therefore charged to both routes
-unequally in an unknown proportion. A projection with a contradicting
-measurement beside it does not get to stand alone, so that row reads
-**unsettled** until the measurement is redone with the buffer supplied rather
-than allocated in the timed region. Everything the roadmap rests on survives
-either way: the 9p row is measured at 1.45× and the vLLM decomposition is
-measured cold, and neither depends on this row.
+**The first-touch row cannot be settled on this machine, and that is now
+demonstrated rather than suspected.** The arithmetic gives 1.49×; the one
+end-to-end measurement near that link rate says **0.94×**. The experiment to
+decide between them was run and could not be: 15.7 GB of never-before-read
+copies, `mincore` confirming 0.0% Linux residency every time, all read at
+5.3–5.6 GB/s — the *host-cache-warm* rate, not the 1.6–2.0 a first touch gives.
+Restaging with the protocol that produced cold reads an hour earlier changed
+nothing. Whether a read here is cold is Windows host state the guest cannot
+control or observe.
+
+Worse, the contradicting figure may not be cold either. Its plain route was
+1.94 GB/s; a warm read plus the `bytearray` allocation it timed comes to
+2.08 GB/s, and a genuine cold read is 1.6–2.0. **Those are the same number**, and
+nothing in the record tells them apart. `MEASURED.md` has the arithmetic.
+
+So the row reads **unsettled**, and will until this is measured on storage that
+is not behind a host cache. Nothing the roadmap rests on depends on it: the 9p
+row is measured at 1.45×, and the vLLM decomposition is measured on a mount
+where cold *is* obtainable.
 
 **Two rows changed when the decoder figure was corrected**: first-touch NVMe and
 phone-class UFS were both marked "tax" against the retired 1.05 GB/s. UFS now

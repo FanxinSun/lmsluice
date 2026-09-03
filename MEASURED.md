@@ -1430,3 +1430,71 @@ alone. 3.60× is our coded route against *vLLM's* default loader: codec **and**
 reader. The figure that corresponds to 1.45× is the vLLM decomposition's codec
 term, **1.38×** — two harnesses, two link types, a week apart, 1.45 and 1.38.
 That is a cross-check, and it is worth more than either number alone.
+
+---
+
+## The allocation experiment, and a worse thing it found — 2026-09-03
+
+Run to settle whether `strategy.md` §1's first-touch row pays or taxes, by
+redoing the 0.94× measurement with the destination supplied instead of
+allocated inside the timed region. It did not settle that. It found two other
+things, and the second is the one that matters.
+
+### It could not be run cold, and that is now a demonstrated limit
+
+Fifteen point seven gigabytes of never-before-read copies were staged on local
+ext4 and read with `mincore` confirming **0.0% Linux residency** every time. The
+plain route read at **5.31–5.64 GB/s**. That is the host-cache-warm rate; a
+genuine first-touch read on this box is 1.6–2.0.
+
+Restaging with the exact protocol that *did* produce cold reads earlier the same
+day — `posix_fadvise(DONTNEED)` on each file immediately after writing it —
+produced **5.34 GB/s** again. So the protocol is not the variable. **Whether a
+read on this box is cold is a property of Windows host state that the guest can
+neither control nor observe**, and it changed between one hour and the next with
+no action from here. Cold first-touch on local NVMe is not reliably obtainable,
+which is a stronger statement than the earlier "the host cache does not evict
+under pressure" and supersedes any plan to get one by trying harder.
+
+### The distortion the experiment was built to measure
+
+Same files, same host-warm link, fresh process per run, n=4, the *only* variable
+being whether the destination is inside the timed region:
+
+| destination | plain | coded | ratio |
+|---|---|---|---|
+| supplied and pre-faulted outside the clock | 5.36 GB/s | 3.51 GB/s | **0.65×** |
+| allocated inside the clock (`bytearray`) | 1.82 GB/s | 1.37 GB/s | **0.76×** |
+
+**Allocating inside the timing flatters the coded route by 14%**, 0.65 → 0.76.
+It adds a fixed cost to both routes, which drags any ratio toward 1.0 — so it
+helps whichever route is losing. Every figure in this file taken with the
+allocation inside the clock is therefore biased *towards* compression, which is
+the direction that does not feel like an error.
+
+### The worse thing: "cold" and "warm plus allocation" are the same number here
+
+The plain route with allocation inside the clock reads **1.82 GB/s** on a file
+demonstrably served from the host cache at 5.36. Check it against the parts:
+
+    warm read, 1.872 GB at 5.36 GB/s          0.349 s
+    + bytearray(1.87 GB), fresh process       0.550 s
+    = 0.899 s                              -> 2.08 GB/s
+
+The 0.94× run that contradicts §1 reported its plain route at **1.94 GB/s** and
+took that for a cold read. A genuine cold read is 1.6–2.0 GB/s. Warm plus
+allocation is 1.8–2.1. **The two are not distinguishable by rate alone**, and
+this file has no record of `mincore` or any independent check being run on those
+measurements to tell them apart.
+
+So the claim is not that those figures are wrong. It is that **nothing in the
+record establishes they were cold**, and the arithmetic offers an equally good
+explanation in which they were warm and the allocation supplied the difference.
+That applies to the 0.94×, to "ext4 on NVMe, first touch 2.4 GB/s", and to
+anything else derived from a cold protocol that predates `buffer.py` and the
+`mincore` check.
+
+**What would settle it** is not more runs on this machine — the first section
+above is why. It is the same answer as the two open questions already on the
+list: different hardware. Storage not behind a host cache makes cold reads
+obtainable and tells all three of these apart at once.
