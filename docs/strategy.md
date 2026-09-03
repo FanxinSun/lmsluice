@@ -32,16 +32,28 @@ exceed **1.49×**, which is all f = 0.673 can buy.
 | link | GB/s | source | gate | speedup | verdict |
 |---|---|---|---|---|---|
 | ext4 on NVMe, host-cached | 6.2 | measured — but this is the *host* cache, not storage | 0.96× | 0.74× **measured** | **tax** |
-| ext4 on NVMe, first touch | 2.4 | measured, and an upper bound on cold | 2.48× | 1.49× *projected* | **pays, capped** |
+| ext4 on NVMe, first touch | 2.4 | measured, and an upper bound on cold | 2.48× | 1.49× *projected, and contradicted — see below* | **unsettled** |
 | UFS 4.0 (phone) | 4.0 | spec | 1.49× | 1.49× *projected* | **pays, at the cap** |
 | **9p mount to the Windows host** | **0.26** | measured | 22.9× | **1.45× measured** | **pays** |
 | **SATA SSD** | 0.55 | spec | 10.8× | 1.49× *projected* | **pays, capped** |
 | **eMMC / SD / USB** | 0.30 | spec | 19.8× | 1.49× *projected* | **pays, capped** |
 | **1 Gb/s network** | 0.125 | spec | 47.6× | 1.49× *projected* | **pays, capped** |
 
-**Two rows flipped when the decoder figure was corrected**: first-touch NVMe and
-phone-class UFS were both marked "tax" against the retired 1.05 GB/s and both
-pay against 5.95. Only the host-cache-warm row still loses, and that row is not
+**The first-touch row is the one claim here that is not safe yet, and it is the
+project's own rule that says so.** The arithmetic gives 1.49×, but the only cold
+end-to-end measurement near that link rate came out at **0.94×** — n=7, plain
+1.94 GB/s, and taken with the destination allocation *inside* the timing, which
+is worth up to 0.55 s on this fixture and is therefore charged to both routes
+unequally in an unknown proportion. A projection with a contradicting
+measurement beside it does not get to stand alone, so that row reads
+**unsettled** until the measurement is redone with the buffer supplied rather
+than allocated in the timed region. Everything the roadmap rests on survives
+either way: the 9p row is measured at 1.45× and the vLLM decomposition is
+measured cold, and neither depends on this row.
+
+**Two rows changed when the decoder figure was corrected**: first-touch NVMe and
+phone-class UFS were both marked "tax" against the retired 1.05 GB/s. UFS now
+pays at the cap; first-touch NVMe is unsettled, above. Only the host-cache-warm row still loses, and that row is not
 a storage measurement at all — it is RAM, which no CPU decoder competes with.
 
 **The market is every machine that is not reading out of a warm cache.** That is
