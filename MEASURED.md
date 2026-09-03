@@ -1322,7 +1322,7 @@ at a link this slow, compression pays.
 
 ---
 
-## Two methodological notes this file earned the hard way — 2026-08-30
+## Methodological notes this file earned the hard way — from 2026-08-30
 
 Recorded here rather than in `CLAUDE.md`, which is not mine to edit.
 
@@ -1344,6 +1344,36 @@ error **in this project's favour**. That is the pattern worth internalising: a
 number that flatters the thing you are building does not feel like a bug, so the
 arithmetic ceiling has to do the work that suspicion would otherwise do.
 
+### A mode set on a descriptor outlives the measurement that set it
+
+Added 2026-09-03, from reviewing the macOS path before it had ever run.
+
+"Uncache this file" is two different kinds of operation depending on the
+platform, and code that treats them as one gets both of them wrong on the
+second one. Linux's `posix_fadvise(DONTNEED)` is an **event**: it drops what is
+cached and leaves the descriptor exactly as it was. macOS's `F_NOCACHE` is a
+**mode**: it is set on the descriptor and stays set, so every subsequent read
+bypasses the cache — and does not populate it either.
+
+Two failures follow, and neither can appear on the platform the code was
+written on:
+
+- **The measurement that comes next is wrong.** A "warm" rate taken by
+  re-reading after the mode was set is not warm, because that read bypassed the
+  cache too. And clearing the mode is not enough on its own: nothing populated
+  the cache, so the region has to be read once untimed before a timed read means
+  anything.
+- **The object is left changed.** A `Source` that had been probed kept bypassing
+  the cache for the rest of its life, so every load after a probe would have
+  been slower — on one platform only, for a reason nothing in the code says.
+
+**The general form: ask whether an operation is an event or a mode, and if it is
+a mode, whose lifetime it now belongs to.** An event needs no undo. A mode needs
+one, needs it called, and needs the state it suppressed rebuilt before anything
+is measured against it. The same shape appears wherever a measurement changes a
+handle rather than acting on data — `O_DIRECT`, `TCP_NODELAY`, a scheduler or
+governor setting, a `setrlimit`.
+
 ### Two questions this machine cannot answer, and they are the same kind
 
 Both are *different hardware*, not *more work*, and neither is closable by
@@ -1352,13 +1382,15 @@ effort here:
 | question | why this box cannot answer it |
 |---|---|
 | the 2-CU adapter's shared-memory **pool per compute unit** | Exposed by no interface that adapter offers: core Vulkan has no such query, and `VK_AMD_shader_core_properties` and `shader_core_properties2` — both present, both queried — carry no LDS field. Obtainable only by running the kernel on the device. |
-| a true **cold storage rate** | Every read here is served by a host cache the guest cannot address or evict. Obtainable only on storage that is not behind one: a native Linux box, or this one without the hypervisor. |
+| a true **cold storage rate** | Every read here is served by a host cache the guest cannot address or evict — and, as of 2026-09-03, not reliably even when nothing is done differently: the same protocol gave 1.6 GB/s one hour and 5.3 the next. Obtainable only on storage that is not behind such a cache. |
+| whether the coded route pays at a **cold first-touch** link | Downstream of the row above. Its one measurement, 0.94×, is indistinguishable by rate from a warm read plus the allocation it timed. |
 
 They bound the same claim from opposite ends — the first sets how fast a small
-iGPU decodes, the second how slow the link it is racing actually is — and the
+iGPU decodes, the others how slow the link it is racing actually is — and the
 gate is the comparison between them. So the one measurement that would most
 change what this project knows is not a better analysis of this machine. It is
-either of these on a different one.
+any of these on a different one, and the last two are the *same* measurement on
+storage that is not behind a host cache.
 
 ### A test that supplies its own observer cannot tell you the observation works
 
