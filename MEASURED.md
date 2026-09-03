@@ -1415,6 +1415,24 @@ them one at a time as they surface does not converge; a register does.
 | `hf_transfer` — "parallel ranges, no compression" | deprecated; the env var is a no-op | `hf_xet`: CDC at ~64 KB, adaptive 1→64 streams, chunk dedup |
 | "entropy-coded bytes do not chunk-dedup" | false for shape-preserving edits | coded chunks dedup 1:1 for aligned edits; scattered edits amplified by (coded ÷ CDC) chunk size, which is a dial |
 | "lmz beats ZipLLM" / any **> 54.1%** | different corpora | matched corpus: lmz's coder +10.3 points (51.08% vs 40.82%); as shipped 41.83% today, 51.53% once the anchor bug is fixed |
+| **any end-to-end ratio taken before `buffer.py` and the `mincore` check** — the general form, covering 0.94×, "first touch 2.4 GB/s" and anything else from a cold protocol predating them | the destination was allocated inside the timed region, which adds a fixed cost to both routes and so drags the ratio toward 1.0 — biased **up to 14% toward the coded route**; and its coldness is unestablished, because warm-plus-allocation at 1.8–2.1 GB/s is indistinguishable by rate from a genuine first touch at 1.6–2.0 | not replaced — **withdrawn pending storage that is not behind a host cache**. One entry rather than one per figure, because the defect is the method, not the numbers |
+
+### Which figures this does *not* touch, and why
+
+The doubt above is about link rates near the decoder, where a factor of two in
+the link decides the verdict. It does not reach the slow-link results, and the
+reason is arithmetic rather than assertion.
+
+On the 9p mount the plain route measures 0.117–0.146 GB/s cold, and this box's
+*warm* 9p rate is 0.26. Both are **more than twenty times** below the decoder's
+5.95 GB/s, so `min(1/f, decode/link)` saturates at the ratio cap either way:
+**the verdict cannot flip on cache state there.** The 1.45× and the vLLM
+decomposition's 2.62× / 1.38× are therefore unaffected by whether anything was
+cold, which is why they carry the roadmap while the first-touch row is withdrawn.
+
+That is also the general test for whether a host-cache doubt matters to a given
+row: if the *warm* rate is still far below the decoder, cache state changes the
+size of the win and not its sign.
 
 ### One figure the sweep was told to retire and did not
 
