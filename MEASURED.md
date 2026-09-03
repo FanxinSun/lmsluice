@@ -1374,10 +1374,10 @@ is measured against it. The same shape appears wherever a measurement changes a
 handle rather than acting on data — `O_DIRECT`, `TCP_NODELAY`, a scheduler or
 governor setting, a `setrlimit`.
 
-### Two questions this machine cannot answer, and they are the same kind
+### Three questions this machine cannot answer, and two of them are one question
 
-Both are *different hardware*, not *more work*, and neither is closable by
-effort here:
+All are *different hardware*, not *more work*, and none is closable by effort
+here:
 
 | question | why this box cannot answer it |
 |---|---|
