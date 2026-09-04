@@ -1322,6 +1322,102 @@ at a link this slow, compression pays.
 
 ---
 
+## Encryption at rest, measured — 2026-09-04
+
+**Machine.** AMD Ryzen 7 9800X3D, 8 cores / 16 logical, AES-NI present; WSL2 on
+Linux 6.18; Python 3.13; OpenSSL 3.5.5 reached as `libcrypto.so.3` through
+`ctypes`. AES-256-GCM, one 16-byte tag per codec unit.
+
+### The rate, and which resource it is a rate of
+
+Ciphertext bytes per second — the unit `plan.py` prices the decrypt stage in,
+because decryption consumes coded bytes and produces coded bytes.
+
+| chunk | 1 thread | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 64 KiB | **7.6** | 1.0 | 0.23 | 0.19 | 0.19 |
+| 1 MiB | **15.7** | 27.0 | 3.6 | 2.9 | 2.9 |
+| 8 MiB | **18.9** | 34.9 | **53.5** | 18.0 | 13.4 |
+
+GB/s, `experiments/decrypt_rate.py --seconds 1.5`, each thread decrypting its
+own ciphertext.
+
+**The shape of that table is not AES.** Throughput falling as threads are added
+is not something a cipher does. The same work run across *processes* instead of
+threads, 1 MiB chunks, scales 15.1 → 33.7 → 59.4 → **99.4 GB/s** on 1, 2, 4 and
+8 workers — near-linear. So the ceiling on the threaded numbers is the
+interpreter: a short foreign call that releases and reacquires the GIL scales
+the wrong way, and the cliff moves with the work per call, which is why 64 KiB
+breaks at 2 threads, 1 MiB at 4 and 8 MiB at 8.
+
+That makes it portable in the way that matters: it is a property of reaching a
+library through `ctypes` from CPython, not of this CPU's AES throughput. Any
+machine that reaches libcrypto this way has it. What it depends on is the work
+per foreign call — chunk size — and the thread count, both of which are
+parameters here rather than constants.
+
+### What it costs where it actually runs
+
+The table above is back-to-back decryption with no I/O. The load path
+interleaves read, decrypt and decode, so it was measured directly: 403 MB BF16
+checkpoint, lmz-coded to 202 MB, sealed to 202 MB, warm page cache, best of 5,
+allocation outside the timed region.
+
+| fetch threads | coded GB/s | sealed GB/s | encryption costs |
+|---|---|---|---|
+| 1 | 3.71 | 3.61 | 3% |
+| 2 | 3.84 | 3.47 | 9% |
+| 4 | 3.87 | 3.25 | 16% |
+| 8 | 3.73 | 3.30 | 11% |
+| 16 (old default) | 3.69 | **2.90** | **21%** |
+
+**The default was the worst setting available.** `probe.default_threads()`
+returned 16 here, chosen because the fetch stage normally only waits on the
+device. A sealed archive makes that pool compute, and it now asks for
+`SEALED_FETCH = 2`; the measured sealed load went from 2.90 to 3.24 GB/s, so
+encryption costs ~10% rather than 21%. A caller that has measured its own
+machine still passes `fetch_threads` and overrides it.
+
+**Decryption does not bind on this box, at any depth measured** — the decode
+stage at ~3.7 GB/s dominates, and storage is 6.34 GB/s. It would bind on a
+machine whose decrypt rate falls below its storage rate, which is why the stage
+is in the rate model rather than assumed free: `Route.limited_by` names
+`decrypt` when it is the slowest thing in the fetch pool.
+
+### Three of my own numbers that were wrong before these were right
+
+Worth recording because each was invisible until something else was measured.
+
+1. **`backend()` took a global mutex on every chunk.** The memoised probe was
+   guarded by a lock that the hot path re-acquired per `seal` and per
+   `open_chunk`, so sixteen fetch threads serialised on it. Symptom: decrypt
+   throughput *falling* from 7.2 GB/s on one thread to 0.18 on sixteen.
+2. **The output was copied three times.** `ctypes.create_string_buffer` zeroes
+   what it allocates, `.raw` materialises the whole buffer, and the slice
+   copies it again — four passes over memory for one pass of AES. Invisible at
+   64 KiB, where it sits in L2; at 8 MiB it was most of the cost, and it made
+   large chunks look 7× slower than small ones, which is backwards. Writing
+   into a `bytearray` and trimming in place took single-thread 8 MiB from 0.89
+   to 13.9 GB/s.
+3. **`blob[:-TAG_BYTES]` copied the whole chunk under the GIL.** Slicing the
+   tag off looks free and is a full-length Python-level copy in the serial
+   section. Addressing the ciphertext and its tag in place took the 8 MiB
+   aggregate from 13.9 to 53.5 GB/s.
+
+The first sweep this file could have published — before any of the three —
+would have read "AES-256-GCM decrypts at 0.89 GB/s on this machine and gets
+slower with threads", and every conclusion drawn from it would have been about
+my own code rather than about encryption.
+
+### One more that was a measurement bug, not a code bug
+
+The first attempt to explain the thread cliff blamed a shared working set, and
+the fix — giving each thread its own ciphertext — changed the numbers by
+nothing. The hypothesis was wrong, and the thread-versus-process comparison is
+what actually identified the binding resource. A rate measured on one
+configuration cannot say *what* limits it; a comparison across configurations
+that differ in one thing can.
+
 ## Methodological notes this file earned the hard way — from 2026-08-30
 
 Recorded here rather than in `CLAUDE.md`, which is not mine to edit.

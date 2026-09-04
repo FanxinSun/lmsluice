@@ -132,13 +132,18 @@ class Profile:
     host: dict = field(default_factory=dict)
     storage: dict = field(default_factory=dict)
     codecs: dict = field(default_factory=dict)
+    # Ciphertext bytes per second, at the fetch depth a sealed archive uses.
+    # Optional and defaulted so a profile written before encryption existed
+    # still loads: it reads back as None, which prices the stage as unknown
+    # rather than as free.
+    decrypt: float | None = None
     measured_at: float = 0.0
     schema: int = SCHEMA
 
     # -- serialisation ----------------------------------------------------
     def to_json(self) -> dict:
         return {"schema": self.schema, "measured_at": self.measured_at,
-                "host": self.host,
+                "host": self.host, "decrypt": self.decrypt,
                 "storage": {k: asdict(v) for k, v in self.storage.items()},
                 "codecs": {k: asdict(v) for k, v in self.codecs.items()}}
 
@@ -150,6 +155,7 @@ class Profile:
             host=d.get("host", {}),
             storage={k: Storage(**v) for k, v in d.get("storage", {}).items()},
             codecs={k: Codec(**v) for k, v in d.get("codecs", {}).items()},
+            decrypt=d.get("decrypt"),
             measured_at=d.get("measured_at", 0.0), schema=SCHEMA)
 
     def save(self, path: str | None = None) -> str:

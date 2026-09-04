@@ -74,6 +74,7 @@ class Stage:
     name: str
     nbytes: int
     rate: float | None                 # bytes/s, or None if never measured
+    pool: str = ""                     # stages sharing a pool run serially
 
     @property
     def seconds(self) -> float | None:
@@ -107,14 +108,39 @@ class Route:
         """
         if not self.known:
             return None
-        times = [s.seconds for s in self.stages]
-        return max(times) if self.overlapped else sum(times)
+        if not self.overlapped:
+            return sum(s.seconds for s in self.stages)
+        return max(t for t, _ in self._pools())
+
+    def _pools(self):
+        """(seconds, slowest stage) per pool, summing the stages inside one.
+
+        Two stages share a pool when they run on the same threads, and then
+        they are serial with each other however parallel the route is: a
+        sealed archive decrypts on the fetch pool, so its bytes are read and
+        then decrypted before the decode pool sees them, while that decode
+        still overlaps both. Modelling it as one more parallel stage would
+        have priced decryption at zero until it was slower than everything
+        else, which is exactly the case where it stops being free.
+
+        A stage with no pool is its own, so a route that names none behaves as
+        it did before this existed: the slowest stage, and no sums.
+        """
+        groups: dict[str, list] = {}
+        for i, s in enumerate(self.stages):
+            groups.setdefault(s.pool or f"\x00{i}", []).append(s)
+        return [(sum(s.seconds for s in g), max(g, key=lambda s: s.seconds))
+                for g in groups.values()]
 
     @property
     def limited_by(self) -> str:
+        """The stage to attack. The binding pool, then its slowest stage --
+        so a fetch pool that is 90% decryption says `decrypt`, not `read`."""
         if not self.known:
             return "unknown"
-        return max(self.stages, key=lambda s: s.seconds).name
+        if not self.overlapped:
+            return max(self.stages, key=lambda s: s.seconds).name
+        return max(self._pools(), key=lambda p: p[0])[1].name
 
     @property
     def device_bytes(self) -> int:
@@ -157,7 +183,8 @@ class Decision:
 def read_plan(plain_bytes: int, coded_bytes: int | None, *,
               source: float | None, decode: float | None,
               margin: float = MARGIN,
-              expand_write: float | None = None) -> Decision:
+              expand_write: float | None = None,
+              decrypt: float | None = None) -> Decision:
     """Choose between reading a model plain and reading it coded.
 
     `source` is the rate of the link the bytes come over; `decode` the rate
@@ -176,9 +203,16 @@ def read_plan(plain_bytes: int, coded_bytes: int | None, *,
         return Decision(only, (only,), None, False,
                         "the target is not compressed and no ratio is known "
                         "for it, so there is nothing to compare", margin)
+    # Decryption is priced on the fetch pool, where it runs: coded bytes in,
+    # coded bytes out, serial with the read that produced them. `None` when
+    # the archive is not sealed, and then the route is what it always was.
+    fetch = [Stage("read", coded_bytes, source, pool="fetch")]
+    if decrypt is not None:
+        fetch.append(Stage("decrypt", coded_bytes, decrypt, pool="fetch"))
     routes = [only,
-              Route("coded", (Stage("read", coded_bytes, source),
-                              Stage("decode", plain_bytes, decode)))]
+              Route("coded", (*fetch,
+                              Stage("decode", plain_bytes, decode,
+                                    pool="decode")))]
     if expand_write:
         # Not overlapped, and not by an oversight: the file has to exist
         # before it can be opened, so nothing here runs at the same time as

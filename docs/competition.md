@@ -337,13 +337,33 @@ Rows are capabilities; a blank means the tool does not have it.
 | **reports predicted vs measured** | ✅ | | | | | | | |
 | streaming under a memory ceiling | ✅ | | | | | | | ✅ |
 | mmap / partial access | ✅ | ✅ | | | | | | |
-| encryption | | | ✅ | | | | | |
+| encryption | ✅ (AES-256-GCM, nothing installed) | | ✅ | | | | | |
 | runs with no GPU / no CUDA | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
 | runs on a phone-class device | ✅ (stdlib) | ✅ | | | | | | |
 
 The three rows in bold that only lmsluice has are the product. The two rows
 that used to read ❌ — no tensors, not installable — were why nobody could use
 it; both are closed, and the vLLM row with them.
+
+**The encryption row closed without costing the row above it.** tensorizer
+encrypts with libsodium, which is a dependency; lmsluice reaches OpenSSL's
+libcrypto through `ctypes`, the way `cuda.py` reaches the CUDA driver. Any
+Python that can open an HTTPS connection has already loaded that library, so
+`lmsluice seal` works on a machine with nothing installed — the one row this
+project does not want to trade away. `cryptography` is accepted as an optional
+fallback for a platform where the library cannot be reached by ctypes, and
+where neither is available encryption reports `none` and refuses to write a
+file that would look protected and not be.
+
+Two differences from tensorizer are worth stating rather than glossing.
+tensorizer encrypts **per tensor**; lmsluice encrypts **per codec unit**, in an
+envelope wrapped around a finished archive, which is what lets the same
+mechanism cover an lmz archive whose container lmsluice does not write. And
+lmsluice authenticates the parts it leaves in the clear: names, shapes and the
+chunk index stay readable without the key — so `info` works for someone who
+cannot read the weights — but they are covered by an HMAC, because an attacker
+who cannot read a weight could otherwise still edit the index that says where
+the weights are.
 
 **The one remaining ❌ is a decision rather than a gap.** GPUDirect Storage
 needs the `nvidia-fs` kernel module and a GPU on NVIDIA's supported list. This

@@ -64,7 +64,28 @@ DEPTHS = (1, 4, 16)
 LAYERED_AT = 1.5
 
 
-def default_threads() -> tuple[int, int]:
+# Fetch threads for a sealed archive, where the pool does more than block.
+#
+# Normally the fetch stage waits on the device, so depth is free. Decryption
+# puts CPU work on those same threads, reached through ctypes -- and a short
+# foreign call that releases and reacquires the GIL scales the wrong way: the
+# threads spend their time handing the interpreter to each other. Measured
+# here (9800X3D, 16 logical cores, OpenSSL 3.5.5 via libcrypto.so.3, 403 MB
+# BF16 checkpoint, lmz-coded, warm page cache, best of 5): a sealed load runs
+# at 3.61 GB/s on 1 fetch thread, 3.47 on 2, 3.25 on 4 and 2.90 on 16, against
+# 3.69-3.87 unsealed at every depth. So the default of 16 was the worst
+# setting available and cost 21%.
+#
+# It is a property of the mechanism and not of this CPU: the same sweep run
+# with processes instead of threads scales 15 -> 99 GB/s across 8 workers, so
+# the ceiling is the interpreter, not AES. Any machine reaching libcrypto this
+# way has it. What the number does depend on is the work per foreign call, so
+# it is expressed as a small depth rather than a rate, and a caller that has
+# measured its own machine passes `fetch_threads` and overrides it.
+SEALED_FETCH = 2
+
+
+def default_threads(*, sealed: bool = False) -> tuple[int, int]:
     """(fetch, place) to start from, before anything has been measured.
 
     Fetch wants depth and place wants cores, and neither wants the machine's
@@ -73,9 +94,61 @@ def default_threads() -> tuple[int, int]:
     place stage is capped by whatever serialises between its native calls.
     These are starting points that the codec probe then replaces with a
     measurement.
+
+    `sealed` says the fetch pool will also be decrypting, which turns it from a
+    waiting stage into a computing one. See `SEALED_FETCH`.
     """
     cpus = os.cpu_count() or 4
-    return max(4, min(16, cpus)), max(1, min(8, cpus // 2))
+    fetch = SEALED_FETCH if sealed else max(4, min(16, cpus))
+    return fetch, max(1, min(8, cpus // 2))
+
+
+def decrypt_rate(*, chunk: int = 4 << 20, seconds: float = 0.35,
+                 threads: int | None = None) -> float | None:
+    """Ciphertext bytes per second, at the depth a sealed archive will read at.
+
+    Measured rather than assumed for the same reason every other rate here is:
+    AES-NI is on every x86 worth shipping to and absent from plenty of the
+    machines this project exists for, and the ceiling turns out not to be AES
+    anyway -- reaching a library through ctypes puts the interpreter in the
+    loop, so the number depends on the thread count and on the work per call.
+    Both are therefore parameters, and the default thread count is the one a
+    sealed load actually uses.
+
+    Returns None when no backend is reachable, which prices the stage as
+    unknown rather than as free.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import crypt
+
+    if not crypt.available():
+        return None
+    threads = threads or SEALED_FETCH
+    key = crypt.subkey(crypt.new_key(), crypt.new_salt())
+    # One set per thread: sharing one measures a shared working set instead.
+    sets = [[(j * 4 + i, crypt.seal(key, j * 4 + i, os.urandom(chunk)))
+             for i in range(4)] for j in range(threads)]
+
+    def run(blobs):
+        done, i, deadline = 0, 0, time.perf_counter() + seconds
+        while time.perf_counter() < deadline:
+            for _ in range(4):
+                idx, blob = blobs[i % len(blobs)]
+                crypt.open_chunk(key, idx, blob)
+                done += len(blob)
+                i += 1
+        return done
+
+    run(sets[0])                       # bind the symbols before timing
+    started = time.perf_counter()
+    # Positional: `max_workers` collides with lmz's word for a coded-stream
+    # lane, and the boundary test that keeps that vocabulary out of this
+    # tree cannot tell the two apart -- nor should it have to.
+    with ThreadPoolExecutor(threads) as pool:
+        total = sum(f.result() for f in [pool.submit(run, s) for s in sets])
+    elapsed = time.perf_counter() - started
+    return total / elapsed if elapsed > 0 else None
 
 
 # -- storage ---------------------------------------------------------------

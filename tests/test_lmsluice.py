@@ -16,8 +16,10 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import shutil
 import random
 import struct
+import zlib
 import sys
 import tempfile
 import threading
@@ -2257,6 +2259,570 @@ class TestColdMeasurementIsRestored(unittest.TestCase):
             after.count("read"), 2,
             "after restoring, the probe must prime the cache with an untimed "
             "read before timing the warm one")
+
+
+# -- encryption at rest ----------------------------------------------------
+
+class TestCrypt(unittest.TestCase):
+    """The cipher layer on its own: keys, nonces, tags, and no backend."""
+
+    def setUp(self):
+        from lmsluice import crypt
+
+        self.crypt = crypt
+        if not crypt.available():
+            self.skipTest(f"no crypto backend: {crypt.backend()[1]}")
+
+    def test_a_raw_key_is_never_stripped(self):
+        """A 32-byte key whose first or last byte is ASCII whitespace.
+
+        `bytes.strip()` removes 0x09, 0x0a, 0x0b, 0x0c, 0x0d and 0x20, so
+        reading a key file as `fh.read().strip()` silently turns roughly one
+        random key in twenty into a 31-byte error. It happened on the first key
+        this module ever generated, and the failure is intermittent by
+        construction: the same code accepts the next key it is given.
+        """
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        for byte in (0x20, 0x09, 0x0a, 0x0b, 0x0c, 0x0d):
+            for pos in (0, 31):
+                raw = bytearray(os.urandom(32))
+                raw[pos] = byte
+                path = os.path.join(d, "k.bin")
+                with open(path, "wb") as fh:
+                    fh.write(bytes(raw))
+                self.assertEqual(
+                    self.crypt.load_key(path), bytes(raw),
+                    f"a key with {byte:#04x} at position {pos} was mangled")
+
+    def test_a_hex_key_file_is_accepted_and_whitespace_around_it_is_not_data(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "k.hex")
+        with open(path, "w") as fh:
+            fh.write("  " + "ab" * 32 + "\n")
+        self.assertEqual(self.crypt.load_key(path), bytes.fromhex("ab" * 32))
+
+    def test_a_short_key_is_refused_rather_than_hashed_into_shape(self):
+        """Accepting a passphrase here would give a file that looks encrypted
+        and is not, which is worse than refusing."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        path = os.path.join(d, "k.bin")
+        with open(path, "wb") as fh:
+            fh.write(b"hunter2")
+        with self.assertRaises(self.crypt.CryptoUnavailable):
+            self.crypt.load_key(path)
+
+    def test_the_key_is_never_taken_from_argv(self):
+        """argv is readable by every process on the machine out of `/proc`, so
+        a flag that took a key would hand it to the box. The CLI must offer a
+        path and nothing else."""
+        from lmsluice import cli
+
+        parser = cli.build_parser()
+        text = "\n".join(
+            [parser.format_help()]
+            + [sub.format_help()
+               for action in parser._subparsers._group_actions
+               for sub in action.choices.values()])
+        self.assertNotIn("--key ", text, "no flag may take a key directly")
+        self.assertNotIn("--key=", text)
+        self.assertIn("--key-file", text, "there must be a way to name one")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "lmsluice", "cli.py")) as fh:
+            src = fh.read()
+        self.assertNotIn('add_argument("--key"', src)
+
+    def test_round_trip_is_exact_from_one_byte_to_eight_megabytes(self):
+        key = self.crypt.subkey(self.crypt.new_key(), self.crypt.new_salt())
+        for n in (0, 1, 15, 16, 17, 4096, 1 << 20):
+            data = bytes((i * 7) & 0xFF for i in range(n))
+            blob = self.crypt.seal(key, 3, data)
+            self.assertEqual(len(blob), n + self.crypt.TAG_BYTES)
+            self.assertEqual(bytes(self.crypt.open_chunk(key, 3, blob)), data)
+
+    def test_a_flipped_bit_is_refused_and_no_plaintext_comes_back(self):
+        key = self.crypt.subkey(self.crypt.new_key(), self.crypt.new_salt())
+        blob = bytearray(self.crypt.seal(key, 0, b"weights" * 600))
+        for pos in (0, len(blob) // 2, len(blob) - 1):
+            bad = bytearray(blob)
+            bad[pos] ^= 0x01
+            with self.assertRaises(self.crypt.DecryptionFailed):
+                self.crypt.open_chunk(key, 0, bytes(bad))
+
+    def test_the_wrong_nonce_is_refused(self):
+        """The nonce is the chunk ordinal, so reading a chunk as if it were a
+        different chunk must fail rather than return rearranged bytes."""
+        key = self.crypt.subkey(self.crypt.new_key(), self.crypt.new_salt())
+        blob = self.crypt.seal(key, 4, b"x" * 4096)
+        with self.assertRaises(self.crypt.DecryptionFailed):
+            self.crypt.open_chunk(key, 5, blob)
+
+    def test_two_archives_under_one_key_get_different_subkeys(self):
+        """What makes a counter nonce sound. Chunk 0 of every archive uses the
+        same nonce; only the per-archive subkey keeps that from being nonce
+        reuse, which breaks GCM completely."""
+        master = self.crypt.new_key()
+        salts = [self.crypt.new_salt() for _ in range(32)]
+        self.assertEqual(len(set(salts)), 32)
+        keys = {self.crypt.subkey(master, s) for s in salts}
+        self.assertEqual(len(keys), 32, "a salt did not change the subkey")
+        self.assertEqual(self.crypt.nonce_for(0), self.crypt.nonce_for(0))
+
+    def test_the_key_identifier_reveals_nothing_and_still_distinguishes(self):
+        keys = [self.crypt.new_key() for _ in range(16)]
+        ids = [self.crypt.key_id(k) for k in keys]
+        self.assertEqual(len(set(ids)), 16)
+        for k, i in zip(keys, ids):
+            self.assertNotIn(k.hex()[:8], i)
+            self.assertNotIn(k[:4], k[:0] + i.encode())
+
+
+class TestCryptWithNoBackend(unittest.TestCase):
+    """Everything still works; encryption says it cannot, and writes nothing.
+
+    Run in a subprocess with the backend disabled, because `crypt` memoises the
+    probe once per process -- which is the point of it, and means this cannot
+    be tested by patching a global in this one.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _run(self, body):
+        import subprocess
+
+        prog = f"import sys; sys.path.insert(0, {self.ROOT!r})\n" + body
+        env = dict(os.environ, LMSLUICE_NO_CRYPTO="1")
+        return subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                              text=True, timeout=120, env=env)
+
+    def test_the_package_imports_and_says_encryption_is_unavailable(self):
+        r = self._run(
+            "import lmsluice\n"
+            "from lmsluice import crypt\n"
+            "name, why = crypt.backend()\n"
+            "assert name == 'none', name\n"
+            "assert not crypt.available()\n"
+            "assert 'unavailable' in crypt.describe()\n"
+            "print('OK')\n")
+        self.assertIn("OK", r.stdout, r.stdout + r.stderr[-600:])
+
+    def test_it_refuses_to_write_a_file_it_cannot_protect(self):
+        """The failure mode to avoid is a file that looks encrypted and is not."""
+        r = self._run(
+            "import tempfile, os\n"
+            "from lmsluice import crypt, sealed\n"
+            "d = tempfile.mkdtemp()\n"
+            "src = os.path.join(d, 'x'); open(src, 'wb').write(b'0' * 64)\n"
+            "dst = os.path.join(d, 'y')\n"
+            "try:\n"
+            "    sealed.seal_file(src, dst, None)\n"
+            "    print('FAILED: it wrote something')\n"
+            "except crypt.CryptoUnavailable:\n"
+            "    print('OK' if not os.path.exists(dst) else 'FAILED: left a file')\n")
+        self.assertIn("OK", r.stdout, r.stdout + r.stderr[-600:])
+
+    def test_the_whole_suite_of_plain_operations_still_runs(self):
+        r = self._run(
+            "import tempfile, os, json, struct\n"
+            "from lmsluice.zstdcodec import encoder\n"
+            "from lmsluice.model import Model\n"
+            "d = tempfile.mkdtemp()\n"
+            "hdr = {'w': {'dtype': 'BF16', 'shape': [16],"
+            " 'data_offsets': [0, 32]}}\n"
+            "b = json.dumps(hdr).encode(); b += b' ' * ((8 - len(b) % 8) % 8)\n"
+            "p = os.path.join(d, 'm.safetensors')\n"
+            "open(p, 'wb').write(struct.pack('<Q', len(b)) + b + bytes(32))\n"
+            "c = os.path.join(d, 'm.lmsl'); encoder().encode(p, c)\n"
+            "with Model(c) as m:\n"
+            "    assert bytes(m.load()) == open(p, 'rb').read()\n"
+            "print('OK')\n")
+        self.assertIn("OK", r.stdout, r.stdout + r.stderr[-600:])
+
+
+class TestSealedEnvelope(unittest.TestCase):
+    """The envelope over a real archive, through the real load path."""
+
+    def setUp(self):
+        from lmsluice import crypt, sealed
+
+        self.crypt, self.sealed = crypt, sealed
+        if not crypt.available():
+            self.skipTest(f"no crypto backend: {crypt.backend()[1]}")
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.old_env = os.environ.get("LMSLUICE_KEY_FILE")
+        self.addCleanup(self._restore_env)
+
+        self.plain = os.path.join(self.dir, "m.safetensors")
+        self.names, hdr, off, body = [f"blk.{i}" for i in range(8)], {}, 0, bytearray()
+        rnd = random.Random(4)
+        for n in self.names:
+            nb = 8192
+            body += bytes(b for _ in range(nb // 2)
+                          for b in (rnd.getrandbits(8), 0x3E))
+            hdr[n] = {"dtype": "BF16", "shape": [nb // 2],
+                      "data_offsets": [off, off + nb]}
+            off += nb
+        blob = json.dumps(hdr, separators=(",", ":")).encode()
+        blob += b" " * ((8 - len(blob) % 8) % 8)
+        with open(self.plain, "wb") as fh:
+            fh.write(struct.pack("<Q", len(blob)) + blob + bytes(body))
+        with open(self.plain, "rb") as fh:
+            self.truth = fh.read()
+
+        self.key_file = os.path.join(self.dir, "key.bin")
+        with open(self.key_file, "wb") as fh:
+            fh.write(crypt.new_key())
+        self.other_key = os.path.join(self.dir, "other.bin")
+        with open(self.other_key, "wb") as fh:
+            fh.write(crypt.new_key())
+
+        from lmsluice.zstdcodec import encoder
+
+        self.inner = os.path.join(self.dir, "m.lmsl")
+        encoder().encode(self.plain, self.inner, chunk_size=8192)
+        self.outer = os.path.join(self.dir, "m.sealed")
+        sealed.seal_file(self.inner, self.outer, self.key_file)
+
+    def _restore_env(self):
+        if self.old_env is None:
+            os.environ.pop("LMSLUICE_KEY_FILE", None)
+        else:
+            os.environ["LMSLUICE_KEY_FILE"] = self.old_env
+
+    def _key(self, path):
+        if path is None:
+            os.environ.pop("LMSLUICE_KEY_FILE", None)
+        else:
+            os.environ["LMSLUICE_KEY_FILE"] = path
+
+    def test_round_trip_is_byte_identical(self):
+        from lmsluice.model import Model
+
+        self._key(self.key_file)
+        with Model(self.outer) as m:
+            self.assertEqual(bytes(m.load()), self.truth)
+
+    def test_stream_returns_every_tensor_unchanged(self):
+        """`stream()` and `load()` are different code paths -- one windows, the
+        other gathers -- so a decrypting source has to satisfy both."""
+        from lmsluice.model import Model
+
+        self._key(self.key_file)
+        with Model(self.outer) as m:
+            seen = 0
+            for name, mv in m.stream():
+                t = m.tensors[name]
+                self.assertEqual(bytes(mv), self.truth[t.start:t.end], name)
+                seen += 1
+            self.assertEqual(seen, len(self.names))
+
+    def test_a_named_subset_reads_only_what_it_asked_for(self):
+        from lmsluice.model import Model
+
+        self._key(self.key_file)
+        want = self.names[2:4]
+        with Model(self.outer) as m:
+            buf = bytes(m.load(want))
+            base = m.base
+            for n in want:
+                t = m.tensors[n]
+                self.assertEqual(buf[t.start - base:t.end - base],
+                                 self.truth[t.start:t.end], n)
+            # The view spans the member by contract, so the evidence that only
+            # part of it was decoded is that the rest is still untouched: a
+            # tensor at the far end, in no block that any requested tensor
+            # touches, must not have been decrypted into the buffer.
+            far = m.tensors[self.names[-1]]
+            self.assertNotEqual(buf[far.start - base:far.end - base],
+                                self.truth[far.start:far.end],
+                                "the whole archive was decoded for two tensors")
+
+    def test_the_structure_reads_without_a_key_and_the_weights_do_not(self):
+        """The trade this design makes, and it must hold in both directions:
+        `info` works for someone who cannot decrypt, and `load` does not."""
+        from lmsluice.model import Model
+
+        self._key(None)
+        with Model(self.outer) as m:
+            self.assertEqual(sorted(m.tensors), sorted(self.names))
+            self.assertEqual(m.route, "coded")
+            self.assertIsNotNone(m.encrypted)
+            self.assertFalse(m._arc.source.verified)
+            with self.assertRaises(self.crypt.CryptoUnavailable):
+                m.load()
+
+    def test_a_sealed_archive_is_never_mappable(self):
+        """There is no arrangement of page tables that decrypts, so the plain
+        route cannot serve this file however fast the disk is."""
+        from lmsluice.model import Model, NotMappable
+
+        self._key(self.key_file)
+        with Model(self.outer) as m:
+            with self.assertRaises(NotMappable):
+                m.map()
+
+    def test_the_wrong_key_is_refused_when_the_file_is_opened(self):
+        from lmsluice.model import Model
+
+        self._key(self.other_key)
+        with self.assertRaises(ValueError) as caught:
+            Model(self.outer).close()
+        self.assertIn("different key", str(caught.exception))
+        self.assertIn("Nothing was decrypted", str(caught.exception))
+
+    def _tamper(self, pos, name):
+        with open(self.outer, "rb") as fh:
+            raw = bytearray(fh.read())
+        raw[pos] ^= 0x01
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(bytes(raw))
+        return path
+
+    def test_a_tampered_payload_is_refused_by_the_tag_and_the_unit_is_named(self):
+        from lmsluice.model import Model
+        from lmsluice.source import open_source
+
+        self._key(self.key_file)
+        with self.sealed.SealedSource(open_source(self.outer)) as src:
+            rows = [r for r in src._rows if r[4] == self.sealed.SEALED]
+        self.assertGreaterEqual(len(rows), 2, "need a sealed extent to hit")
+        path = self._tamper(rows[1][2] + 3, "tampered.lmsl")
+        with self.assertRaises(ValueError) as caught:
+            with Model(path) as m:
+                m.load()
+        text = str(caught.exception)
+        self.assertIn("failed authentication", text)
+        self.assertIn("unit", text, "the failing unit must be named")
+
+    def test_a_rewritten_index_is_refused_by_the_mac(self):
+        """The attack the payload tags cannot see. Every byte here is a valid
+        archive: the index decompresses, the extents are well formed, and the
+        ciphertext is untouched -- only which ciphertext each unit points at
+        has changed. Without the MAC an attacker who cannot read a weight can
+        still decide which weight gets loaded."""
+        from lmsluice.model import Model
+
+        self._key(self.key_file)
+        with open(self.outer, "rb") as fh:
+            raw = bytearray(fh.read())
+        ioff, ilen, _ = self.sealed.FOOTER.unpack(raw[-self.sealed.FOOTER.size:])
+        index = json.loads(zlib.decompress(bytes(raw[ioff:ioff + ilen])))
+        i, j = [k for k, r in enumerate(index["extents"])
+                if r[4] == self.sealed.SEALED][:2]
+        for f in (2, 3):
+            index["extents"][i][f], index["extents"][j][f] = \
+                index["extents"][j][f], index["extents"][i][f]
+        blob = zlib.compress(json.dumps(index, separators=(",", ":")).encode(), 6)
+        path = os.path.join(self.dir, "rewritten.lmsl")
+        with open(path, "wb") as fh:
+            fh.write(bytes(raw[:ioff]) + blob
+                     + self.sealed.FOOTER.pack(ioff, len(blob), self.sealed.TAIL))
+        with self.assertRaises(ValueError) as caught:
+            Model(path).close()
+        self.assertIn("structure failed authentication", str(caught.exception))
+
+    def test_a_tampered_clear_region_is_refused_by_the_mac(self):
+        from lmsluice.model import Model
+        from lmsluice.source import open_source
+
+        self._key(self.key_file)
+        with self.sealed.SealedSource(open_source(self.outer)) as src:
+            clear = [r for r in src._rows if r[4] == self.sealed.CLEAR and r[3]]
+        self.assertTrue(clear, "the container should have a header or an index")
+        path = self._tamper(clear[-1][2], "clear.lmsl")
+        with self.assertRaises(ValueError) as caught:
+            Model(path).close()
+        self.assertIn("structure failed authentication", str(caught.exception))
+
+    def test_the_key_never_reaches_the_archive(self):
+        with open(self.key_file, "rb") as fh:
+            key = fh.read()
+        with open(self.outer, "rb") as fh:
+            whole = fh.read()
+        self.assertNotIn(key, whole)
+        self.assertNotIn(key.hex().encode(), whole)
+        self.assertNotIn(key.hex().upper().encode(), whole)
+        # Nor into the header that is meant to be public.
+        from lmsluice.source import open_source
+
+        with self.sealed.SealedSource(open_source(self.outer)) as src:
+            text = json.dumps(src.encryption).encode()
+        self.assertNotIn(key, text)
+        self.assertNotIn(key.hex().encode(), text)
+
+    def test_two_archives_of_the_same_file_under_one_key_differ(self):
+        """Same input, same key, different bytes -- because the salt is fresh.
+        Identical ciphertext would leak that two files are the same file."""
+        a = os.path.join(self.dir, "a.sealed")
+        b = os.path.join(self.dir, "b.sealed")
+        self.sealed.seal_file(self.inner, a, self.key_file)
+        self.sealed.seal_file(self.inner, b, self.key_file)
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            self.assertNotEqual(fa.read(), fb.read())
+        from lmsluice.source import open_source
+
+        with self.sealed.SealedSource(open_source(a), key_file=self.key_file) as x, \
+             self.sealed.SealedSource(open_source(b), key_file=self.key_file) as y:
+            self.assertNotEqual(x.encryption["salt"], y.encryption["salt"])
+            self.assertEqual(x.encryption["key_id"], y.encryption["key_id"])
+            self.assertNotEqual(x._key, y._key)
+
+    def test_a_sealed_archive_asks_for_a_fetch_depth_chosen_for_computing(self):
+        """The fetch pool decrypts, so it is no longer a stage that only waits.
+        Measured on the development box, the default of 16 was the worst
+        setting available; see `probe.SEALED_FETCH`."""
+        from lmsluice.model import Model
+        from lmsluice.probe import SEALED_FETCH, default_threads
+
+        self._key(self.key_file)
+        with Model(self.outer) as sealed_model, Model(self.inner) as plain_model:
+            self.assertEqual(sealed_model._fetch_threads, SEALED_FETCH)
+            self.assertEqual(plain_model._fetch_threads, default_threads()[0])
+        with Model(self.outer, fetch_threads=7) as m:
+            self.assertEqual(m._fetch_threads, 7, "a caller may still override")
+
+    def test_the_plan_can_name_decryption_as_the_binding_stage(self):
+        """A rate model that cannot express a stage cannot be told the stage is
+        the problem. Decryption runs on the fetch pool, so it is serial with
+        the read and parallel with the decode."""
+        from lmsluice.plan import read_plan
+
+        GB = 1_000_000_000
+        common = dict(source=6.34 * GB, decode=5.95 * GB)
+        fast = read_plan(10 * GB, 6.7 * GB, decrypt=40 * GB, **common)
+        slow = read_plan(10 * GB, 6.7 * GB, decrypt=0.4 * GB, **common)
+        coded = lambda d: [r for r in d.routes if r.name == "coded"][0]
+        self.assertNotEqual(coded(fast).limited_by, "decrypt")
+        self.assertEqual(coded(slow).limited_by, "decrypt")
+        self.assertGreater(coded(slow).seconds, coded(fast).seconds)
+        # And an unsealed archive is priced exactly as it was before.
+        none = read_plan(10 * GB, 6.7 * GB, **common)
+        self.assertEqual(len(coded(none).stages), 2)
+
+
+class TestEncryptionStaysOutOfTheCodecs(unittest.TestCase):
+    """`docs/boundary.md`, applied to this feature.
+
+    Encryption changes when the threat model changes, not when the format
+    does, so it belongs to lmsluice and no codec may mention it. The practical
+    half of the same rule: `LmzEncoder.encode` hands the whole job to lmz,
+    which writes its own container, so a codec-level option could only ever
+    have encrypted the fallback codec.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ALLOWED = {"crypt.py", "sealed.py", "cli.py"}
+
+    def sources(self):
+        d = os.path.join(self.ROOT, "lmsluice")
+        for name in sorted(os.listdir(d)):
+            if name.endswith(".py"):
+                with open(os.path.join(d, name)) as fh:
+                    yield name, fh.read()
+
+    def test_only_crypt_reaches_a_cipher_library(self):
+        offenders = []
+        for name, src in self.sources():
+            if name == "crypt.py":
+                continue
+            for line in src.splitlines():
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                if (s.startswith(("import cryptography", "from cryptography"))
+                        or "libcrypto" in s and s.startswith(("import", "from"))
+                        or s.startswith("from ctypes.util") and "crypto" in s):
+                    offenders.append(f"{name}: {s}")
+        self.assertEqual(offenders, [],
+                         "only lmsluice/crypt.py may reach a cipher library")
+
+    def test_no_codec_module_mentions_encryption(self):
+        offenders = []
+        for name, src in self.sources():
+            if name in self.ALLOWED or "codec" not in name:
+                continue
+            body = "\n".join(l for l in src.splitlines()
+                              if not l.strip().startswith("#"))
+            if body.count('"""') >= 2:
+                body = body.split('"""', 2)[2]
+            for word in ("encrypt", "decrypt", "AES", "GCM", "key_file",
+                         "nonce", "cipher"):
+                if word in body:
+                    offenders.append(f"{name}: {word}")
+        self.assertEqual(offenders, [],
+                         "a codec must not know that encryption exists -- "
+                         "see docs/boundary.md and lmsluice/sealed.py")
+
+    def test_no_module_ever_logs_or_prints_key_material(self):
+        """A key that reaches a log has left the machine's memory and entered
+        its disk, its journal and whatever ships those elsewhere. The variables
+        holding one are named here so a `print` or a `log` of them is a
+        grep-able mistake rather than a silent one."""
+        # `key` means two different things in this tree -- a storage key in
+        # `cli.py` and `rates.py`, key material in the two crypto modules -- so
+        # the ambiguous names are checked only where they hold bytes, and the
+        # unambiguous ones everywhere.
+        anywhere = ("master", "subkey", "mac_key")
+        in_crypto = ("key", "raw", "self._key")
+        offenders = []
+        for name, src in self.sources():
+            held = anywhere + (in_crypto if name in ("crypt.py", "sealed.py")
+                               else ())
+            for i, line in enumerate(src.splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#") or not (
+                        s.startswith(("print(", "log.", "logger.", "warnings."))
+                        or ".info(" in s or ".debug(" in s or ".warning(" in s):
+                    continue
+                for var in held:
+                    if f"{{{var}}}" in s or f", {var})" in s or f"({var})" in s:
+                        offenders.append(f"{name}:{i}: {s}")
+        self.assertEqual(offenders, [],
+                         "a key, a subkey or a raw key file must never be "
+                         "printed or logged")
+
+    def test_an_archive_is_portable_between_backends(self):
+        """The backend named in the header is informational, not a
+        requirement: AES-256-GCM is AES-256-GCM. A file sealed where libcrypto
+        was reachable has to open where only the extra is, or the header would
+        be pinning archives to whichever machine wrote them."""
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        except ImportError:
+            self.skipTest("the `cryptography` extra is not installed here")
+        from lmsluice import crypt
+
+        if crypt.backend()[0] != "openssl":
+            self.skipTest("this process is not running the openssl backend")
+        key = crypt.subkey(crypt.new_key(), crypt.new_salt())
+        for n in (0, 1, 4096, 1 << 20):
+            data = bytes((i * 5) & 0xFF for i in range(n))
+            nonce = crypt.nonce_for(7)
+            # openssl seals, the extra opens.
+            self.assertEqual(
+                AESGCM(key).decrypt(nonce, crypt.seal(key, 7, data), None), data)
+            # the extra seals, openssl opens.
+            self.assertEqual(
+                bytes(crypt.open_chunk(
+                    key, 7, AESGCM(key).encrypt(nonce, data, None))), data)
+
+    def test_crypt_imports_nothing_that_is_not_the_standard_library(self):
+        with open(os.path.join(self.ROOT, "lmsluice", "crypt.py")) as fh:
+            src = fh.read()
+        stdlib = {"ctypes", "hashlib", "hmac", "os", "secrets", "threading",
+                  "ssl", "ctypes.util", "__future__"}
+        bad = []
+        for line in src.splitlines():
+            s = line.strip()
+            if s.startswith("import ") and not s.startswith("import ."):
+                mod = s[len("import "):].split()[0].split(".")[0]
+                if mod not in stdlib and mod != "cryptography":
+                    bad.append(s)
+        self.assertEqual(bad, [], "crypt.py must need nothing installed")
 
 
 if __name__ == "__main__":

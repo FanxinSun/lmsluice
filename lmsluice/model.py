@@ -99,9 +99,10 @@ class Model:
         self._src = None
         self._mm = None
         self._mm_access = None
-        f, p = default_threads()
-        self._fetch_threads = fetch_threads or f
-        self._place_threads = place_threads or p
+        # Settled below, once the source has said whether it is sealed: a
+        # fetch pool that decrypts wants a different depth from one that waits.
+        self._want_fetch = fetch_threads
+        self._want_place = place_threads
 
         src = open_source(target)
         coded = _is_coded(src)
@@ -137,6 +138,13 @@ class Model:
             self.plain_bytes = src.size
             self.coded_bytes = src.size
 
+        # Settled here and not earlier: whether the fetch pool will also be
+        # decrypting is not known until the source has been opened, and it
+        # changes what a good depth is. See `probe.SEALED_FETCH`.
+        f, pl = default_threads(sealed=self.encrypted is not None)
+        self._fetch_threads = self._want_fetch or f
+        self._place_threads = self._want_place or pl
+
         self.profile = profile if profile is not None else Profile.load()
         self.plan = self._make_plan()
         if prefer in ("plain", "coded") and prefer != self.route:
@@ -153,6 +161,17 @@ class Model:
     @property
     def ratio(self) -> float:
         return self.coded_bytes / self.plain_bytes if self.plain_bytes else 1.0
+
+    @property
+    def encrypted(self) -> dict | None:
+        """The archive's encryption header, or None when it is not sealed.
+
+        Public because `info`, a plan and anything reporting on a load all need
+        to say so, and reading it off a chain of private attributes would make
+        that contract accidental. Never contains the key -- only the algorithm,
+        the backend, the salt and a key identifier derived by HMAC.
+        """
+        return getattr(getattr(self._arc, "source", None), "encryption", None)
 
     @property
     def base(self) -> int:
@@ -526,9 +545,22 @@ class Model:
                          + f"  note: the coded row is hypothetical, at the "
                            f"r={ratio:.3f} measured on "
                            f"{os.path.basename(codec.archive) or 'another archive'}")
+        # A sealed archive has one more stage, on the fetch pool. Priced from
+        # a rate measured on this machine when one has been taken, and left
+        # None otherwise -- an unmeasured stage makes the route unknown, which
+        # is the honest answer and not a guess dressed as one.
+        decrypt = None
+        if self.encrypted is not None:
+            decrypt = (self.profile.decrypt if self.profile
+                       and getattr(self.profile, "decrypt", None) else None)
+            if decrypt is None:
+                note += (("\n" if note else "")
+                         + "  note: this archive is encrypted and no decrypt "
+                           "rate has been measured here, so the coded row "
+                           "prices a stage it cannot see. Run: lmsluice probe")
         decision = _plan.read_plan(
             self.plain_bytes, coded_bytes, source=source, decode=decode,
-            expand_write=(st.write if st else None))
+            decrypt=decrypt, expand_write=(st.write if st else None))
         return Plan(decision, source, decode,
                     measured=bool(source and (decode or self.route == "plain")),
                     note=note)
@@ -598,7 +630,9 @@ def _is_coded(src) -> bool:
     if src.size < 8:
         return False
     head = src.pread(0, 8)
-    return head[:4] == b"LMZ\x01" or head == b"LMSLUICE"
+    # An encrypted envelope counts, whatever it wraps: it is never mappable,
+    # so the plain route cannot serve it even when the file inside is plain.
+    return head[:4] == b"LMZ\x01" or head in (b"LMSLUICE", b"LMSLSEAL")
 
 
 def _safetensors_index(src, member: str) -> dict:

@@ -51,6 +51,7 @@ in two.
 | `open_model` / `map` / `load` / `stream` / `to_device`; the tensor index of a **plain** file | **lmsluice** |
 | whether to write compressed at all on this machine | **lmsluice** |
 | end-to-end verification that a *moved* model is byte-identical | **lmsluice** |
+| encryption at rest: the envelope, keys, nonces, tags, the structure MAC | **lmsluice** |
 | placement solver, tier budgets, eviction, prefetch, compute overlap | **vram** |
 
 One duplication is deliberate: lmz parses a safetensors header to decide **how to
@@ -162,6 +163,37 @@ Neither is general interface.
 ships the replacement** — so the register cannot quietly outlive its reasons.
 The merge loan's test also asserts that nothing outside `devdecode.py` has
 started reaching through `opaque`, so the two cannot drift apart.
+
+## A worked example of the test: encryption at rest
+
+Added 2026-09-04, and recorded because the first attempt failed the test and
+the second passed it.
+
+Run the three questions on encryption. Does it change if the **format**
+changes? No — the same envelope wraps an lmz archive, a zstd archive and
+whatever comes next. Does it change if the **machine** changes? Yes — which
+cipher library is reachable, whether AES-NI is present, and how many threads
+can decrypt before the interpreter caps them are all machine questions. One
+answer, one owner: lmsluice.
+
+The first implementation ignored that and put a `key_file` option on
+`ZstdEncoder`, sealing each chunk as it was compressed. It worked, it was
+tested, and it was wrong twice over. By this document, it made encryption a
+format concern and would have made every future codec implement it again. By
+the code, `LmzEncoder.encode` is `lmz().compress(src, dst, **opts)` — lmz
+writes its own container and `lmz/` is not ours to edit — so a codec-level
+option could only ever have encrypted the fallback codec and left the one that
+gives the good ratios on BF16 weights unencryptable.
+
+`lmsluice/sealed.py` wraps a finished container instead, and `SealedSource`
+unwraps it as a `Source`, so every codec, `Archive`, `Model` and `probe` reads
+through the interface they already used and none of them learns the word. Two
+tests hold the line: one that only `crypt.py` reaches a cipher library, and one
+that no codec module mentions encryption at all.
+
+The cost of the envelope is honest and stated: sealing is a second pass, so
+peak disk is inner + outer. That is the price of not editing a dependency, and
+it is the right price.
 
 ## Adding something new
 

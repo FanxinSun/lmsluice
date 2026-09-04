@@ -123,6 +123,57 @@ the plain file, and it will tell you so rather than making every later load
 slower. Nothing is cached unless asked, nothing is deleted, and an entry bound to
 a file that has changed misses rather than serving stale weights.
 
+## Encryption at rest
+
+A checkpoint on a shared filesystem, in a bucket, or on a laptop that leaves the
+building is readable by anyone who can read the file.
+
+    lmsluice seal --make-key key.bin              # 32 random bytes, mode 600
+    lmsluice seal model.lmz model.sealed --key-file key.bin
+    LMSLUICE_KEY_FILE=key.bin lmsluice get model.sealed out.safetensors
+
+AES-256-GCM, authenticated, **with nothing installed**: OpenSSL's libcrypto is
+reached through `ctypes`, the same way `cuda.py` reaches the CUDA driver. Any
+Python that can open an HTTPS connection has already loaded it. Nothing here
+invents cryptography — no keystream from `hashlib`, no XOR, no home-made
+construction — and where no library can be reached, encryption reports `none`
+and refuses to write a file that would look protected and not be.
+
+**The key is always a path, never a value.** Not a flag holding a key and not an
+environment variable holding one: on Linux any process can read another's
+command line out of `/proc`, and an environment is inherited by children. The
+key is never logged, never printed, and never written into the archive.
+
+**It wraps the archive rather than living inside a codec.** Encryption changes
+when the threat model changes, not when the format does, so it sits in the
+transport layer as an envelope — which is also the only way it could cover an
+lmz archive, whose container lmz writes and this project does not edit. One
+mechanism, every codec, and no codec that mentions it; a test enforces that.
+
+**Structure stays readable, and is still protected.** Tensor names, shapes and
+the chunk index are in the clear, so `lmsluice info` works for someone who
+cannot read the weights and a loader can plan a partial read before it can
+decrypt one — tensorizer makes the same trade. They are covered by an HMAC
+under a separate subkey, because an attacker who cannot read a weight could
+otherwise still edit the index that says where the weights are. A wrong key is
+refused when the file is opened; a tampered unit is refused by its tag and
+named; nothing half-authentic is ever returned.
+
+**What it costs, measured rather than assumed** (9800X3D, 16 logical cores,
+OpenSSL 3.5.5, 403 MB BF16 checkpoint lmz-coded, warm page cache, best of 5):
+**3% of load throughput on one fetch thread, 21% on sixteen.** The stage is
+priced in `plan.py` like any other and `limited_by` will name `decrypt` where
+it binds. The thread number is the interesting one and it is not about AES:
+the same work run across processes instead of threads scales from 15 to 99
+GB/s, so what caps a threaded fetch pool is the interpreter, not the cipher.
+A sealed archive therefore asks for a *small* fetch depth where an unsealed one
+wants a large one, which is the opposite of the usual advice and is why the
+default is chosen after the file has said whether it is sealed.
+
+The one thing encryption takes away is `mmap`: there is no arrangement of page
+tables that decrypts, so a sealed archive can never take the zero-copy route
+however fast the disk is.
+
 ## The one ratio
 
 Compression is free on a path when the decoder is faster than the link it is

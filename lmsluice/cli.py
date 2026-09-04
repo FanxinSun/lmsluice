@@ -22,7 +22,7 @@ import time
 from . import __version__
 from . import buffer as _buffer
 from .plan import gate_ratio, write_plan
-from .probe import SAMPLE, encode_rate
+from .probe import SAMPLE, SEALED_FETCH, encode_rate
 from .probe import run as probe_run
 from .rates import Profile, age, cache_dir, storage_key
 
@@ -60,6 +60,9 @@ def cmd_probe(args) -> int:
                 **{**(codec.__dict__ if codec else _blank().__dict__),
                    "encode": rate, "ratio": ratio if ratio else
                    (codec.ratio if codec else None)})
+    from .probe import decrypt_rate
+
+    profile.decrypt = decrypt_rate()
     path = profile.save(args.profile)
     print(f"measured in {time.perf_counter() - started:.1f}s -> {path}\n")
     _show_profile(profile)
@@ -77,6 +80,11 @@ def _show_profile(p: Profile) -> None:
     print(f"host    {h.get('system')} {h.get('machine')}, "
           f"{h.get('cpus')} cpus, python {h.get('python')}, "
           f"lmz {h.get('lmz')}")
+    if p.decrypt:
+        from . import crypt
+
+        print(f"        decrypt {p.decrypt / 1e9:.2f} GB/s of ciphertext "
+              f"({crypt.backend()[0]}, {SEALED_FETCH} threads)")
     if h.get("lmz_backends"):
         b = h["lmz_backends"]
         print(f"        lmz kernel {b.get('kernel')}, entropy "
@@ -188,6 +196,13 @@ def cmd_info(args) -> int:
     with open_model(args.target, profile=_profile(args)) as m:
         print(f"{args.target}\n  route {m.route} · {len(m.tensors)} tensors · "
               f"{_bytes(m.plain_bytes)} plain · r={m.ratio:.3f}")
+        enc = getattr(getattr(getattr(m, "_arc", None), "source", None),
+                      "encryption", None)
+        if enc:
+            state = "verified" if m._arc.source.verified else \
+                    "NOT verified (no key supplied)"
+            print(f"  encrypted {enc['algorithm']} via {enc['backend']} · key "
+                  f"id {enc['key_id']} · structure {state}")
         rows = sorted(m.tensors.values(), key=lambda t: -t.nbytes)
         n = len(rows) if args.all else min(len(rows), 20)
         print(f"\n  {'tensor':<52} {'dtype':>6} {'bytes':>10}  shape")
@@ -258,10 +273,13 @@ def cmd_bench(args) -> int:
                 best = min(times)
                 plan = m.device_plan() if args.to_device else m.plan
                 results[m.route] = (best, m.plain_bytes, plan, times)
+                enc = m.encrypted
                 print(f"{os.path.basename(path):<28} {m.route:<6} "
                       f"{m.plain_bytes / best / 1e9:5.2f} GB/s  "
                       f"best of {args.reps}  "
-                      f"({', '.join(f'{x:.2f}s' for x in times)})")
+                      f"({', '.join(f'{x:.2f}s' for x in times)})"
+                      + (f"  ·  {enc['algorithm']} via {enc['backend']}, "
+                         f"{m._fetch_threads} fetch threads" if enc else ""))
         if len(results) == 2:
             pt = results["plain"][0]
             ct = results["coded"][0]
@@ -336,6 +354,51 @@ def cmd_cache(args) -> int:
     return 0
 
 
+def cmd_seal(args) -> int:
+    """Wrap an archive in an encrypted envelope, or read one back out.
+
+    The key is a *path*, never the key itself. argv is world-readable out of
+    `/proc` on Linux and shows up in shell history everywhere, so a flag that
+    took the key would hand it to the machine. `--key-file` and
+    `LMSLUICE_KEY_FILE` both name a file.
+    """
+    from . import crypt, sealed
+
+    if args.make_key:
+        if os.path.exists(args.make_key) and not args.force:
+            print(f"{args.make_key} exists (use --force)", file=sys.stderr)
+            return 1
+        fd = os.open(args.make_key, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(crypt.new_key())
+        print(f"wrote a new 32-byte key to {args.make_key} (mode 600). "
+              f"Lose it and the archives it seals are gone.")
+        return 0
+
+    if args.src is None:
+        print("nothing to do: pass an archive, or --make-key PATH",
+              file=sys.stderr)
+        return 2
+    if not crypt.available():
+        print(f"cannot encrypt: {crypt.backend()[1]}", file=sys.stderr)
+        return 1
+    if os.path.exists(args.dst) and not args.force:
+        print(f"{args.dst} exists (use --force)", file=sys.stderr)
+        return 1
+
+    started = time.perf_counter()
+    header = sealed.seal_file(args.src, args.dst, args.key_file)
+    elapsed = time.perf_counter() - started
+    n = os.path.getsize(args.src)
+    grew = os.path.getsize(args.dst) - n
+    print(f"{args.dst}: {_bytes(os.path.getsize(args.dst))} sealed in "
+          f"{elapsed:.2f}s = {n / elapsed / 1e9:.2f} GB/s")
+    print(f"  {header['algorithm']} via {header['backend']}, key id "
+          f"{header['key_id']}, +{grew} bytes of tags and index")
+    print(f"  structure stays readable without the key; the weights do not")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     p = Profile.load(args.profile)
     print(f"lmsluice {__version__}")
@@ -356,6 +419,13 @@ def cmd_doctor(args) -> int:
               f"{info['total_bytes'] / 1e9:.1f} GB")
     else:
         print(f"cuda not usable: {why}")
+    from . import crypt
+
+    name, why = crypt.backend()
+    if name == "none":
+        print(f"encryption unavailable: {why}")
+    else:
+        print(f"encryption AES-256-GCM via {name} ({why})")
     print(f"cache {cache_dir()}")
     if p is None:
         print("\nno profile for this machine. run:  lmsluice probe <a model file>")
@@ -428,6 +498,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clear", action="store_true")
     p.set_defaults(func=cmd_cache)
 
+    p = sub.add_parser("seal", help="encrypt an archive at rest (AES-256-GCM)")
+    p.add_argument("src", nargs="?", help="the archive to wrap")
+    p.add_argument("dst", nargs="?", help="where to write the envelope")
+    p.add_argument("--key-file", help="file holding a 32-byte key or 64 hex "
+                                      "characters; defaults to $LMSLUICE_KEY_FILE")
+    p.add_argument("--make-key", metavar="PATH",
+                   help="write a fresh random key and exit")
+    p.add_argument("--force", action="store_true", help="overwrite the target")
+    p.set_defaults(func=cmd_seal)
+
     p = sub.add_parser("doctor", help="what is measured and what is active")
     p.set_defaults(func=cmd_doctor)
     return ap
@@ -440,5 +520,14 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         return 130
     except (OSError, ValueError, KeyError, ImportError) as exc:
+        print(f"lmsluice: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:              # noqa: BLE001
+        # A missing or wrong key is something a user did, not something that
+        # broke, and a traceback for it buries the one sentence that helps.
+        from .crypt import CryptoUnavailable
+
+        if not isinstance(exc, CryptoUnavailable):
+            raise
         print(f"lmsluice: {exc}", file=sys.stderr)
         return 1

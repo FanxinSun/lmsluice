@@ -64,7 +64,16 @@ class Archive:
                           else open_source(target))
             # By magic, not by extension: a file's name is a hint and its first
             # eight bytes are a fact.
-            from . import zstdcodec
+            from . import sealed, zstdcodec
+
+            # An encrypted envelope is unwrapped here, before any codec is
+            # asked what it is looking at. That ordering is the whole of the
+            # read side: below this line every codec sees the plaintext
+            # container it would have seen unencrypted, and none of them
+            # contains the word. See `sealed.py` on why encryption is
+            # transport and not format.
+            if sealed.is_sealed(source):
+                source = sealed.SealedSource(source)
 
             if zstdcodec.is_archive(source):
                 codec = zstdcodec.open_codec(target, source)
