@@ -403,6 +403,36 @@ def cmd_cache(args) -> int:
     return 0
 
 
+def cmd_put(args) -> int:
+    """Upload a local file to a bucket.
+
+    Chunked above one part, and it says how many bytes crossed the link --
+    on a metered connection or a billed bucket that is the number paid for,
+    and a rate alone hides it.
+    """
+    from .cloud import put
+
+    if not os.path.isfile(args.src):
+        print(f"{args.src}: not a file", file=sys.stderr)
+        return 1
+    size = os.path.getsize(args.src)
+    shown = [0]
+
+    def progress(done, total):
+        if not args.quiet and done - shown[0] >= (32 << 20):
+            shown[0] = done
+            print(f"  {_bytes(done)} of {_bytes(total)}", file=sys.stderr)
+
+    started = time.perf_counter()
+    report = put(args.src, args.dst, part_bytes=args.part_size,
+                 progress=progress)
+    elapsed = time.perf_counter() - started
+    print(f"{args.dst}: {_bytes(size)} in {elapsed:.2f}s = "
+          f"{size / elapsed / 1e9:.2f} GB/s over the link "
+          f"({report['parts']} × {report['method']}, to {report['store']})")
+    return 0
+
+
 def cmd_seal(args) -> int:
     """Wrap an archive in an encrypted envelope, or read one back out.
 
@@ -561,6 +591,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clear", action="store_true")
     p.set_defaults(func=cmd_cache)
 
+    p = sub.add_parser("put", help="upload a file to s3://, gs:// or az://")
+    p.add_argument("src", help="the local file to upload")
+    p.add_argument("dst", help="s3://bucket/key, gs://bucket/key, "
+                               "or az://account/container/blob")
+    p.add_argument("--part-size", type=int, default=8 << 20,
+                   help="bytes per part (default 8 MiB; S3 needs at least 5 "
+                        "MiB for every part but the last)")
+    p.add_argument("--quiet", action="store_true", help="no progress lines")
+    p.set_defaults(func=cmd_put)
+
     p = sub.add_parser("seal", help="encrypt an archive at rest (AES-256-GCM)")
     p.add_argument("src", nargs="?", help="the archive to wrap")
     p.add_argument("dst", nargs="?", help="where to write the envelope")
@@ -590,6 +630,8 @@ def main(argv=None) -> int:
         # broke, and a traceback for it buries the one sentence that helps.
         from .crypt import CryptoUnavailable
 
+        # `CloudError` needs no entry here: it subclasses `OSError` and is
+        # caught above. Listing it as well would say it is not.
         if not isinstance(exc, CryptoUnavailable):
             raise
         print(f"lmsluice: {exc}", file=sys.stderr)

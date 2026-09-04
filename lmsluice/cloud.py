@@ -475,3 +475,279 @@ def describe(src) -> str:
     auth = getattr(src, "auth", "anonymous" if getattr(src, "anonymous", True)
                    else "signed")
     return f"{cloud} · {getattr(src, 'mode', 'stdlib')} · {auth}"
+
+
+# -- writing ---------------------------------------------------------------
+#
+# The upload side, and it is deliberately last: the download is the case
+# `strategy.md` §2b calls the best arithmetic in the repository -- a model
+# arriving over a link slower than the decoder arrives faster compressed, with
+# no measurement needed to know the sign. Uploading is the mirror and rarer.
+#
+# All three stores chunk a large upload the same way: begin, send numbered
+# parts, then commit a manifest naming them. S3 calls it a multipart upload;
+# GCS's XML API implements the same one, so it is again the same code; Azure
+# calls the parts blocks and the manifest a block list. What actually differs
+# is two URLs and one XML vocabulary.
+
+# 8 MiB. Above S3's 5 MiB floor for every part but the last, and a size where
+# the per-part round trip is amortised without holding much memory. Overridable
+# because the right value is a property of the link, not of this file.
+PART_BYTES = 8 << 20
+
+
+def _xml_text(body: bytes, tag: str) -> str:
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(body)
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == tag:
+            return (el.text or "").strip()
+    raise CloudError(f"no <{tag}> in the store's reply")
+
+
+def _send(src, method: str, url: str, *, body: bytes = b"",
+          headers: dict | None = None, sha: str | None = None) -> tuple:
+    """One signed request with a body. Returns (status, headers, body).
+
+    Separate from `HttpSource.pread` because a write is not a read with a
+    payload: SigV4 signs the SHA-256 of the body, so an upload cannot reuse the
+    empty-payload hash every read uses, and getting that wrong is a 403 that
+    looks like a credential problem.
+    """
+    import hashlib
+    import http.client
+
+    parsed = urllib.parse.urlparse(url)
+    digest = sha if sha is not None else hashlib.sha256(body).hexdigest()
+    out = {**(headers or {}), "Content-Length": str(len(body))}
+    signer = getattr(src, "_signer", None)
+    if signer is not None:
+        try:
+            out = signer(method, url, out, digest)
+        except TypeError:                 # a signer that takes no payload hash
+            out = signer(method, url, out)
+    else:
+        out = {**src.headers, **out}
+    cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+           else http.client.HTTPConnection)
+    conn = cls(parsed.netloc, timeout=src.timeout)
+    try:
+        path = urllib.parse.urlunparse(
+            ("", "", parsed.path or "/", parsed.params, parsed.query, ""))
+        conn.request(method, path, body=body, headers=out)
+        r = conn.getresponse()
+        return r.status, dict(r.getheaders()), r.read()
+    finally:
+        conn.close()
+
+
+def _expect(status: int, body: bytes, what: str, url: str) -> None:
+    if 200 <= status < 300:
+        return
+    raise CloudError(redact_env(
+        f"{what} failed with HTTP {status} for {url}: "
+        f"{body[:400].decode('utf-8', 'replace')}"))
+
+
+def put(local_path: str, target: str, *, part_bytes: int = PART_BYTES,
+        progress=None, **kw) -> dict:
+    """Upload a local file to a bucket URL. Returns a small report.
+
+    Chunked for every store, single-request for a file that fits in one part --
+    a 4 MB archive should not pay three round trips to say so.
+    """
+    scheme = urllib.parse.urlparse(target).scheme
+    if scheme not in SCHEMES:
+        raise CloudError(f"{target}: not an object-store URL")
+    size = os.path.getsize(local_path)
+    src = _writer(target, **kw)
+    try:
+        if src.cloud == "azure":
+            report = _put_azure(src, local_path, size, part_bytes, progress)
+        else:
+            report = _put_s3(src, local_path, size, part_bytes, progress)
+    finally:
+        src.close()
+    report.update(bytes=size, target=target, store=describe(src))
+    return report
+
+
+class _Writer:
+    """A destination: the signed URL and the credentials, with no HEAD.
+
+    `S3Source` and friends probe the object at construction to learn its size
+    and whether ranges work, which is exactly wrong for a target that does not
+    exist yet. This shares their signing and nothing else.
+    """
+
+    def __init__(self, cloud, url, signer, headers, timeout=60.0):
+        self.cloud, self.url, self._signer = cloud, url, signer
+        self.headers, self.timeout = dict(headers or {}), timeout
+        self.mode, self.auth = "stdlib", "signed" if signer else "anonymous"
+        self.anonymous = signer is None and not headers
+
+    def close(self):
+        pass
+
+
+def _writer(target: str, *, profile: str | None = None, **_kw) -> _Writer:
+    parsed = urllib.parse.urlparse(target)
+    scheme = parsed.scheme
+    if scheme == "s3":
+        creds = aws_credentials(profile)
+        region = creds.get("region") or "us-east-1"
+        url, region = s3_url(parsed.netloc, parsed.path.lstrip("/"),
+                             region=region)
+        if not (creds.get("access_key") and creds.get("secret_key")):
+            raise CloudError(f"{target}: writing needs credentials; none found")
+
+        def signer(method, u, hdrs, sha=sign.EMPTY_SHA256, _c=creds):
+            return sign.sigv4_headers(
+                method=method, url=u, region=region, service="s3",
+                access_key=_c["access_key"], secret_key=_c["secret_key"],
+                token=_c.get("token"), headers=hdrs, payload_sha256=sha)
+
+        return _Writer("s3", url, signer, None)
+    if scheme in ("gs", "gcs"):
+        creds = gcs_credentials()
+        host = _endpoint("LMSLUICE_GCS_ENDPOINT", "https://storage.googleapis.com")
+        url = f"{host}/{parsed.netloc}/{parsed.path.lstrip('/')}"
+        if creds.get("mode") == "hmac":
+            def signer(method, u, hdrs, sha=sign.EMPTY_SHA256, _c=creds):
+                return sign.sigv4_headers(
+                    method=method, url=u, region="auto", service="s3",
+                    access_key=_c["access_key"], secret_key=_c["secret_key"],
+                    headers=hdrs, payload_sha256=sha)
+
+            return _Writer("gcs", url, signer, None)
+        token = creds.get("token") or (
+            _refresh_token(creds["refresh"]) if creds.get("mode") == "refresh"
+            else None)
+        if token:
+            return _Writer("gcs", url, None, {"Authorization": f"Bearer {token}"})
+        raise CloudError(f"{target}: writing needs an HMAC pair or a bearer token")
+    creds = azure_credentials()
+    account = parsed.netloc
+    host = _endpoint("LMSLUICE_AZURE_ENDPOINT",
+                     f"https://{account}.blob.core.windows.net")
+    url = f"{host}/{parsed.path.lstrip('/')}"
+    if creds.get("mode") == "shared-key":
+        def signer(method, u, hdrs, _sha=None, _c=creds):
+            return sign.shared_key_header(method=method, url=u,
+                                          account=_c["account"], key=_c["key"],
+                                          headers=hdrs)
+
+        return _Writer("azure", url, signer, None)
+    if creds.get("mode") == "sas":
+        return _Writer("azure", f"{url}?{creds['sas']}", None, None)
+    raise CloudError(f"{target}: writing needs a Shared Key or a SAS")
+
+
+def _parts(path: str, size: int, part_bytes: int):
+    with open(path, "rb") as fh:
+        n = 0
+        while True:
+            block = fh.read(part_bytes)
+            if not block:
+                return
+            n += 1
+            yield n, block
+
+
+def _put_s3(src, path: str, size: int, part_bytes: int, progress) -> dict:
+    """Single PUT under one part; S3/GCS multipart above it.
+
+    An aborted multipart leaves parts billed and invisible, so a failure part
+    way through cancels the upload rather than leaving it for the user to find
+    on a bill. That is the one thing this does beyond the happy path, and it is
+    the one that costs money if omitted.
+    """
+    import hashlib
+
+    if size <= part_bytes:
+        with open(path, "rb") as fh:
+            body = fh.read()
+        status, _, reply = _send(src, "PUT", src.url, body=body,
+                                 sha=hashlib.sha256(body).hexdigest())
+        _expect(status, reply, "PUT", src.url)
+        return {"parts": 1, "method": "single PUT"}
+
+    status, _, reply = _send(src, "POST", f"{src.url}?uploads")
+    _expect(status, reply, "CreateMultipartUpload", src.url)
+    upload = _xml_text(reply, "UploadId")
+    tags = []
+    try:
+        for number, block in _parts(path, size, part_bytes):
+            url = f"{src.url}?partNumber={number}&uploadId={urllib.parse.quote(upload)}"
+            status, headers, reply = _send(
+                src, "PUT", url, body=block,
+                sha=hashlib.sha256(block).hexdigest())
+            _expect(status, reply, f"UploadPart {number}", src.url)
+            etag = headers.get("ETag") or headers.get("etag")
+            if not etag:
+                raise CloudError(f"part {number} came back with no ETag")
+            tags.append((number, etag))
+            if progress:
+                progress(min(number * part_bytes, size), size)
+        body = ("<CompleteMultipartUpload>"
+                + "".join(f"<Part><PartNumber>{n}</PartNumber>"
+                          f"<ETag>{t}</ETag></Part>" for n, t in tags)
+                + "</CompleteMultipartUpload>").encode()
+        url = f"{src.url}?uploadId={urllib.parse.quote(upload)}"
+        status, _, reply = _send(src, "POST", url, body=body,
+                                 sha=hashlib.sha256(body).hexdigest())
+        _expect(status, reply, "CompleteMultipartUpload", src.url)
+    except Exception:
+        # Parts of an abandoned upload are stored and billed and do not appear
+        # in a listing. Cancelling on the way out is the difference between a
+        # failed upload and a charge nobody can find.
+        try:
+            _send(src, "DELETE",
+                  f"{src.url}?uploadId={urllib.parse.quote(upload)}")
+        except Exception:                 # noqa: BLE001 -- the first error wins
+            pass
+        raise
+    return {"parts": len(tags), "method": "multipart"}
+
+
+def _put_azure(src, path: str, size: int, part_bytes: int, progress) -> dict:
+    """One PUT under 256 MiB; staged blocks and a block list above it.
+
+    Azure needs no cancel: staged blocks that are never committed expire on
+    their own, which is the one place its model is kinder than S3's.
+    """
+    import base64
+
+    base, _, query = src.url.partition("?")
+    def at(extra):
+        joined = "&".join(x for x in (query, extra) if x)
+        return f"{base}?{joined}" if joined else base
+
+    if size <= part_bytes:
+        with open(path, "rb") as fh:
+            body = fh.read()
+        status, _, reply = _send(src, "PUT", at(""), body=body,
+                                 headers={"x-ms-blob-type": "BlockBlob"})
+        _expect(status, reply, "PUT Blob", base)
+        return {"parts": 1, "method": "single PUT"}
+
+    ids = []
+    for number, block in _parts(path, size, part_bytes):
+        # Block ids must be the same length for every block in one blob, so
+        # they are zero-padded before base64 rather than after.
+        bid = base64.b64encode(f"{number:08d}".encode()).decode()
+        status, _, reply = _send(
+            src, "PUT", at(f"comp=block&blockid={urllib.parse.quote(bid)}"),
+            body=block)
+        _expect(status, reply, f"Put Block {number}", base)
+        ids.append(bid)
+        if progress:
+            progress(min(number * part_bytes, size), size)
+    body = ("<?xml version='1.0' encoding='utf-8'?><BlockList>"
+            + "".join(f"<Latest>{b}</Latest>" for b in ids)
+            + "</BlockList>").encode()
+    status, _, reply = _send(src, "PUT", at("comp=blocklist"), body=body,
+                             headers={"Content-Type": "application/xml"})
+    _expect(status, reply, "Put Block List", base)
+    return {"parts": len(ids), "method": "block blob"}

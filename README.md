@@ -168,6 +168,18 @@ reach — instance-metadata and IAM roles, service-account JWTs needing RS256,
 managed identity. The request is signed and sent by this package either way,
 and each source reports its mode as `stdlib` or `sdk`.
 
+**Uploading works too**, and is deliberately the second half:
+
+    lmsluice put ./model.lmz s3://my-bucket/model.lmz
+
+All three stores chunk a large upload the same way — begin, send numbered
+parts, commit a manifest naming them. S3 calls it a multipart upload, GCS's XML
+API implements the same one, and Azure calls the parts blocks and the manifest
+a block list; what differs is two URLs and one XML vocabulary. A part-way
+failure **cancels the upload** rather than leaving it, because the parts of an
+abandoned multipart are stored, billed, and absent from a listing — a charge
+whose cause is hard to find later.
+
 Signing costs 12.7 µs per request for SigV4 and 5.9 µs for Shared Key
 (9800X3D, Python 3.14). At the 4 MiB default chunk that is a ceiling of ~330
 GB/s, which is to say free against any link a bucket is reached over — and the

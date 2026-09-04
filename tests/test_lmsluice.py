@@ -13,11 +13,13 @@ remote route rests on and the one that would break silently.
 
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
 import shutil
 import random
+import re as RE
 import struct
 import urllib.parse
 import datetime as DT
@@ -457,6 +459,9 @@ class _fake_store:
         self.cloud, self.key, self.account = cloud, key, account
         self.require_auth = require_auth
         self.seen = []
+        self.uploads = {}
+        self.blocks = {}
+        self.fail_part = None
 
     def __enter__(self):
         outer = self
@@ -475,7 +480,7 @@ class _fake_store:
                 with open(full, "rb") as fh:
                     return fh.read()
 
-            def _authorised(self):
+            def _authorised(self, body=b""):
                 got = self.headers.get("Authorization")
                 outer.seen.append({k.lower(): v for k, v in self.headers.items()})
                 if not outer.require_auth:
@@ -486,11 +491,13 @@ class _fake_store:
                 sent = {k: v for k, v in self.headers.items()
                         if k.lower() != "authorization"}
                 if outer.cloud == "azure":
+                    # Every header the client sent, not only `x-ms-*`:
+                    # Content-Length is one of Azure's twelve positional lines,
+                    # so filtering it out here re-derives a different string
+                    # and rejects a correct request.
                     want = SIGN.shared_key_header(
                         method=self.command, url=url, account=outer.account,
-                        key=outer.key,
-                        headers={k: v for k, v in sent.items()
-                                 if k.lower().startswith("x-ms-")})
+                        key=outer.key, headers=sent)
                 else:
                     stamp = self.headers.get("x-amz-date")
                     when = DT.datetime.strptime(
@@ -509,7 +516,16 @@ class _fake_store:
                         headers={k: v for k, v in sent.items()
                                  if k.lower() in signed.split(";")
                                  and not k.lower().startswith(("x-amz-", "host"))},
+                        payload_sha256=self.headers.get(
+                            "x-amz-content-sha256") or SIGN.EMPTY_SHA256,
                         when=when)
+                    # The client must hash the body it actually sent. Checking
+                    # it here is what makes a write test a test: a signature
+                    # over the empty hash would otherwise pass on every upload.
+                    if body:
+                        want_sha = hashlib.sha256(body).hexdigest()
+                        if self.headers.get("x-amz-content-sha256") != want_sha:
+                            return False
                 return want["Authorization"] == got
 
             def _deny(self):
@@ -530,6 +546,84 @@ class _fake_store:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
+
+            def _body(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                return self.rfile.read(n) if n else b""
+
+            def _reply(self, code, body=b"", extra=None):
+                self.send_response(code)
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if body:
+                    self.wfile.write(body)
+
+            def do_DELETE(self):
+                body = self._body()
+                if not self._authorised(body):
+                    return self._deny()
+                q = urllib.parse.parse_qs(
+                    urllib.parse.urlparse(self.path).query)
+                outer.uploads.pop(q.get("uploadId", [""])[0], None)
+                self._reply(204)
+
+            def do_POST(self):
+                body = self._body()
+                if not self._authorised(body):
+                    return self._deny()
+                p = urllib.parse.urlparse(self.path)
+                q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+                if "uploads" in q:
+                    uid = f"u{len(outer.uploads) + 1}"
+                    outer.uploads[uid] = {}
+                    return self._reply(200, (
+                        f"<InitiateMultipartUploadResult><Bucket>b</Bucket>"
+                        f"<Key>k</Key><UploadId>{uid}</UploadId>"
+                        f"</InitiateMultipartUploadResult>").encode())
+                uid = q.get("uploadId", [""])[0]
+                parts = outer.uploads.pop(uid, None)
+                if parts is None:
+                    return self._reply(404)
+                # Assemble in the order the manifest names, not the order the
+                # parts arrived -- which is what a concurrent upload tests.
+                order = [int(x) for x in RE.findall(
+                    r"<PartNumber>(\d+)</PartNumber>",
+                    body.decode("utf-8", "replace"))]
+                blob = b"".join(parts[n] for n in order)
+                with open(os.path.join(outer.directory,
+                                       os.path.basename(p.path)), "wb") as fh:
+                    fh.write(blob)
+                self._reply(200, b"<CompleteMultipartUploadResult/>")
+
+            def do_PUT(self):
+                body = self._body()
+                if not self._authorised(body):
+                    return self._deny()
+                p = urllib.parse.urlparse(self.path)
+                q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+                name = os.path.join(outer.directory, os.path.basename(p.path))
+                if "partNumber" in q:
+                    if outer.fail_part == int(q["partNumber"][0]):
+                        return self._reply(500, b"<Error>no space</Error>")
+                    uid = q["uploadId"][0]
+                    outer.uploads.setdefault(uid, {})[
+                        int(q["partNumber"][0])] = body
+                    return self._reply(
+                        200, extra={"ETag": f'"{hashlib.md5(body).hexdigest()}"'})
+                if q.get("comp", [""])[0] == "block":
+                    outer.blocks.setdefault(name, {})[q["blockid"][0]] = body
+                    return self._reply(201)
+                if q.get("comp", [""])[0] == "blocklist":
+                    ids = RE.findall(r"<Latest>([^<]+)</Latest>",
+                                     body.decode("utf-8", "replace"))
+                    with open(name, "wb") as fh:
+                        fh.write(b"".join(outer.blocks[name][i] for i in ids))
+                    return self._reply(201)
+                with open(name, "wb") as fh:
+                    fh.write(body)
+                self._reply(201)
 
             def do_GET(self):
                 body = self._blob()
@@ -3284,6 +3378,138 @@ class TestCloudSources(unittest.TestCase):
                 for name, mv in m.stream():
                     t = m.tensors[name]
                     self.assertEqual(bytes(mv), truth[t.start:t.end], name)
+
+
+class TestCloudWrites(unittest.TestCase):
+    """Uploads, against a fake that checks the signature *and* the body hash.
+
+    Checking the body hash is what makes these tests mean something. SigV4
+    signs the SHA-256 of the payload, and a client that signs the empty-payload
+    hash on every request -- the value every *read* correctly uses -- produces
+    a request that a lax fake accepts and a real store rejects.
+    """
+
+    KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    AZKEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.out = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.out, ignore_errors=True)
+        self.saved = dict(os.environ)
+        self.addCleanup(self._restore)
+        for k in list(os.environ):
+            if k.startswith(("AWS_", "AZURE_", "GCS_", "GOOGLE_", "LMSLUICE_")):
+                os.environ.pop(k, None)
+
+    def _restore(self):
+        os.environ.clear()
+        os.environ.update(self.saved)
+
+    def _fixture(self, size):
+        path = os.path.join(self.dir, "up.bin")
+        with open(path, "wb") as fh:
+            fh.write(os.urandom(size))
+        with open(path, "rb") as fh:
+            return path, fh.read()
+
+    def test_a_small_object_goes_in_one_request(self):
+        from lmsluice.cloud import put
+
+        path, data = self._fixture(64_000)
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.out, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            report = put(path, "s3://bucket/up.bin")
+        self.assertEqual(report["method"], "single PUT")
+        self.assertEqual(report["parts"], 1)
+        with open(os.path.join(self.out, "up.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_a_large_object_goes_in_parts_and_arrives_in_order(self):
+        from lmsluice.cloud import put
+
+        path, data = self._fixture(300_000)
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.out, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            report = put(path, "s3://bucket/up.bin", part_bytes=64_000)
+        self.assertEqual(report["method"], "multipart")
+        self.assertEqual(report["parts"], 5)
+        with open(os.path.join(self.out, "up.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), data, "parts were assembled wrong")
+
+    def test_azure_stages_blocks_and_commits_a_block_list(self):
+        from lmsluice.cloud import put
+
+        path, data = self._fixture(300_000)
+        os.environ.update(AZURE_STORAGE_ACCOUNT="acct",
+                          AZURE_STORAGE_KEY=self.AZKEY)
+        with _fake_store(self.out, "azure", key=self.AZKEY,
+                         account="acct") as base:
+            os.environ["LMSLUICE_AZURE_ENDPOINT"] = base
+            report = put(path, "az://acct/cont/up.bin", part_bytes=64_000)
+        self.assertEqual(report["method"], "block blob")
+        self.assertEqual(report["parts"], 5)
+        with open(os.path.join(self.out, "up.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_gcs_uploads_over_the_same_multipart_as_s3(self):
+        from lmsluice.cloud import put
+
+        path, data = self._fixture(200_000)
+        os.environ.update(GCS_HMAC_ACCESS_KEY="AK", GCS_HMAC_SECRET=self.KEY)
+        with _fake_store(self.out, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_GCS_ENDPOINT"] = base
+            put(path, "gs://bucket/up.bin", part_bytes=64_000)
+        with open(os.path.join(self.out, "up.bin"), "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_a_failed_multipart_is_cancelled_rather_than_left_billing(self):
+        """Parts of an abandoned upload are stored, billed, and absent from a
+        listing. Leaving them is a charge the user cannot find the cause of, so
+        a failure part way through must abort the upload on its way out."""
+        from lmsluice.cloud import CloudError, put
+
+        path, _ = self._fixture(300_000)
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        store = _fake_store(self.out, "s3", key=self.KEY)
+        store.fail_part = 3
+        with store as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with self.assertRaises(CloudError) as caught:
+                put(path, "s3://bucket/up.bin", part_bytes=64_000)
+            self.assertIn("UploadPart 3", str(caught.exception))
+            self.assertEqual(store.uploads, {},
+                             "an abandoned multipart was left on the store")
+
+    def test_writing_without_credentials_is_refused_before_anything_is_sent(self):
+        from lmsluice.cloud import CloudError, put
+
+        path, _ = self._fixture(1024)
+        with self.assertRaises(CloudError) as caught:
+            put(path, "s3://bucket/up.bin")
+        self.assertIn("credentials", str(caught.exception))
+
+    def test_a_round_trip_through_a_bucket_is_byte_identical(self):
+        """The pair that matters: written by `put`, read back by the ordinary
+        source, and compared to what went in."""
+        from lmsluice.cloud import put
+        from lmsluice.source import open_source
+
+        path, data = self._fixture(250_000)
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.out, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            put(path, "s3://bucket/up.bin", part_bytes=64_000)
+            with open_source("s3://bucket/up.bin") as s:
+                self.assertEqual(s.size, len(data))
+                self.assertEqual(s.pread(0, s.size), data)
 
 
 class TestCredentialsNeverEscape(unittest.TestCase):

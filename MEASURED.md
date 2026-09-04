@@ -1469,6 +1469,21 @@ Loopback throughput against the fake is deliberately not recorded. It measures
 a Python `http.server` on the same box, which is neither a bucket nor this
 machine's link, and a number that means nothing is worse than no number.
 
+### The write path, same standard
+
+Uploads go through the same fake, which additionally **checks the SHA-256 of
+the body against `x-amz-content-sha256`**. That check is what makes an upload
+test a test: SigV4 signs the hash of the payload, and a client that reuses the
+empty-payload hash every *read* correctly sends would pass against a lax fake
+and be rejected by every real store.
+
+Verified offline: single PUT under one part; S3 and GCS multipart above it,
+reassembled in the order the manifest names rather than the order the parts
+arrived; Azure staged blocks committed by block list; a store-side failure on
+part 3 aborting the upload rather than leaving parts billed; a refusal before
+anything is sent when no credentials exist; and a 21 MB checkpoint uploaded,
+downloaded and decoded byte-identical through `lmsluice put` and `lmsluice get`.
+
 ### Two bugs, both mine, both found by running it
 
 1. **`redact()` did not terminate.** It replaced the value after `?sig=` and
