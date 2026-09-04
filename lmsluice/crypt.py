@@ -122,23 +122,39 @@ def _candidates() -> list:
             "libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libeay32.dll"]
 
 
-def _load_openssl():
-    # First, symbols already in this process. `import ssl` has loaded libcrypto
-    # as a dependency, and asking the process for its own symbols dlopens
-    # nothing -- so where it works it is both the fastest path and the one that
-    # cannot trip a dyld guard. It often does not work, because CPython loads
-    # extension modules with RTLD_LOCAL, so it is a try and not a plan.
-    try:
-        import ssl                        # noqa: F401 -- for the side effect
-    except ImportError:
-        pass
-    try:
-        lib = ctypes.CDLL(None)
-        _bind_openssl(lib)
-        return lib, "already loaded in this process"
-    except (AttributeError, OSError, TypeError):
-        pass
+# NIST GCM test case 14: a 256-bit key of zeros, a 96-bit IV of zeros, and a
+# 16-byte plaintext of zeros. Small enough to run at probe time, and it fails
+# for every way a library can be the wrong library.
+_KAT_CT = bytes.fromhex("cea7403d4d606b6e074ec5d3baf39d18")
+_KAT_TAG = bytes.fromhex("d0d1c8a799996bf0265b98b5d48ab919")
 
+
+def _selftest(lib) -> bool:
+    """Does this library actually compute AES-256-GCM correctly?
+
+    Binding proves a symbol exists. It does not prove the library behind it is
+    the one meant, and the difference is not academic: `ctypes.CDLL(None)` on
+    macOS resolves `EVP_*` against Apple's LibreSSL, every symbol binds, and
+    the first real call **segfaults** -- which CI found after the SIGABRT this
+    replaced, on the same platform, one commit later.
+
+    So a candidate is accepted only once it has produced a published answer.
+    That shortcut is gone too: a symbol table is not an ABI contract, and the
+    only way to know a cipher is the right cipher is to make it compute
+    something whose value is already known.
+    """
+    global _lib
+    was, _lib = _lib, lib
+    try:
+        out = _openssl_seal(bytes(32), bytes(12), bytes(16))
+        return out == _KAT_CT + _KAT_TAG
+    except Exception:                     # noqa: BLE001
+        return False
+    finally:
+        _lib = was
+
+
+def _load_openssl():
     for name in _candidates():
         if not name:
             continue
@@ -151,6 +167,8 @@ def _load_openssl():
                 _bind_openssl(lib)
             except AttributeError:
                 continue
+            if not _selftest(lib):
+                continue                  # binds, but does not compute AES-GCM
             return lib, name
     return None, ""
 

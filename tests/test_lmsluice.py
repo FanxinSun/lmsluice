@@ -3165,6 +3165,36 @@ class TestEncryptionStaysOutOfTheCodecs(unittest.TestCase):
             cut, darwin.index("]"),
             "find_library is reached before the Darwin branch returns")
 
+    def test_a_backend_is_only_believed_once_it_computes_a_known_answer(self):
+        """Binding a symbol is not evidence that the library is the right one.
+
+        `ctypes.CDLL(None)` on macOS resolved every `EVP_*` name against
+        Apple's LibreSSL and then segfaulted on the first real call. Nothing at
+        bind time could have told the difference; only making it compute a
+        published value can.
+        """
+        from lmsluice import crypt
+
+        if not crypt.available():
+            self.skipTest(f"no backend: {crypt.backend()[1]}")
+        self.assertTrue(crypt._selftest(crypt._lib),
+                        "the live backend fails NIST GCM test case 14")
+
+        class Wrong:
+            """Binds cleanly, computes nonsense."""
+
+            def __getattr__(self, name):
+                import ctypes
+
+                f = ctypes.CDLL(None).abs      # exists everywhere, wrong shape
+                f.restype = ctypes.c_int
+                f.argtypes = None
+                return f
+
+        self.assertFalse(crypt._selftest(Wrong()),
+                         "a library that does not compute AES-256-GCM was "
+                         "accepted anyway")
+
     def test_crypt_imports_nothing_that_is_not_the_standard_library(self):
         with open(os.path.join(self.ROOT, "lmsluice", "crypt.py")) as fh:
             src = fh.read()
