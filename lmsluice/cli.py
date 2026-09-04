@@ -308,9 +308,32 @@ def cmd_write(args) -> int:
         enc, r = rate, ratio
     else:
         enc, r = codec.encode, codec.ratio
-    d = write_plan(size, r or 1.0, sink=st.write if st else None, encode=enc)
+    # The encrypted row appears only when this machine can actually seal, and
+    # is priced from rates already measured here rather than a new constant.
+    from . import crypt
+    from .plan import seal_rate
+
+    seal = None
+    if args.seal and crypt.available():
+        seal = seal_rate(source=st.source or st.warm_bound if st else None,
+                         sink=st.write if st else None,
+                         encrypt=profile.decrypt if profile else None)
+        if seal is None:
+            print("  note: the encrypted row needs a read rate, a write rate "
+                  "and a decrypt rate for this machine. Run: lmsluice probe",
+                  file=sys.stderr)
+    elif args.seal:
+        print(f"  note: cannot price encryption here: {crypt.backend()[1]}",
+              file=sys.stderr)
+    d = write_plan(size, r or 1.0, sink=st.write if st else None, encode=enc,
+                   seal=seal)
     print(f"{args.target}  {_bytes(size)}  r={r:.3f}" if r else args.target)
     print(d.explain())
+    if seal:
+        print(f"\n  the encrypted row is a second pass: the archive is written, "
+              f"then read back\n  and rewritten sealed, so both copies exist at "
+              f"once. Peak disk is the\n  GB-on-disk column, not the GB moved "
+              f"one.")
     return 0
 
 
@@ -484,6 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_bench)
 
     p = sub.add_parser("write", help="price compressing on the way out")
+    p.add_argument("--seal", action="store_true",
+                   help="also price encrypting it, wall clock and peak disk")
     p.add_argument("target", help="a plain model file")
     p.add_argument("--measure", action="store_true", help="re-measure the encoder")
     p.add_argument("--sample", type=int, default=SAMPLE)

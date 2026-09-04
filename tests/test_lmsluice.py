@@ -2685,6 +2685,57 @@ class TestSealedEnvelope(unittest.TestCase):
         with Model(self.outer, fetch_threads=7) as m:
             self.assertEqual(m._fetch_threads, 7, "a caller may still override")
 
+    def test_writing_a_sealed_archive_is_priced_as_two_passes(self):
+        """The cost of not editing lmz. The envelope wraps a finished
+        container, so the archive is written and then read back and rewritten
+        sealed: two terms a 70 GB checkpoint should see before it starts, not
+        after. Wall clock as a second phase, disk as a high-water mark."""
+        from lmsluice.plan import seal_rate, write_plan
+
+        GB = 1_000_000_000
+        rate = seal_rate(source=6.34 * GB, sink=2.0 * GB, encrypt=18.0 * GB)
+        self.assertLess(rate, 2.0 * GB, "a serial loop cannot beat its slowest part")
+        d = write_plan(70 * GB, 0.673, sink=2.0 * GB, encode=0.9 * GB, seal=rate)
+        by = {r.name: r for r in d.routes}
+        self.assertIn("sealed", by)
+        # The second pass is charged, not absorbed into the first.
+        self.assertGreater(by["sealed"].seconds, by["coded"].seconds)
+        # And the first pass's own overlap is still credited: charging every
+        # stage serially would make it encode + write + seal.
+        serial = sum(s.seconds for s in by["sealed"].stages)
+        self.assertLess(by["sealed"].seconds, serial)
+        # Traffic is the same; disk is not.
+        self.assertEqual(by["sealed"].device_bytes, by["coded"].device_bytes)
+        self.assertEqual(by["sealed"].peak_bytes, 2 * by["coded"].peak_bytes)
+        self.assertIn("GB on disk", d.explain())
+
+    def test_an_unsealed_write_plan_is_exactly_what_it_always_was(self):
+        """Phases and a disk column must cost nothing where nothing seals."""
+        from lmsluice.plan import write_plan
+
+        GB = 1_000_000_000
+        d = write_plan(70 * GB, 0.673, sink=2.0 * GB, encode=0.9 * GB)
+        self.assertEqual([r.name for r in d.routes], ["plain", "coded"])
+        for r in d.routes:
+            self.assertEqual(r.peak_bytes, r.device_bytes)
+        self.assertNotIn("GB on disk", d.explain())
+
+    def test_the_seal_rate_is_derived_from_the_machine_and_not_a_constant(self):
+        """`seal_rate` re-evaluates elsewhere without re-measuring: a slow disk
+        with a fast cipher and a fast disk with a phone-class one must give
+        different answers, and a missing term must give none at all."""
+        from lmsluice.plan import seal_rate
+
+        GB = 1_000_000_000
+        fast_disk = seal_rate(source=6.34 * GB, sink=6.0 * GB, encrypt=0.3 * GB)
+        slow_disk = seal_rate(source=0.5 * GB, sink=0.2 * GB, encrypt=18.0 * GB)
+        self.assertLess(fast_disk, 0.3 * GB, "the cipher binds when it is slow")
+        self.assertLess(slow_disk, 0.2 * GB, "the disk binds when it is slow")
+        self.assertNotAlmostEqual(fast_disk, slow_disk)
+        self.assertIsNone(seal_rate(source=None, sink=1 * GB, encrypt=1 * GB))
+        self.assertIsNone(seal_rate(source=1 * GB, sink=None, encrypt=1 * GB))
+        self.assertIsNone(seal_rate(source=1 * GB, sink=1 * GB, encrypt=None))
+
     def test_the_plan_can_name_decryption_as_the_binding_stage(self):
         """A rate model that cannot express a stage cannot be told the stage is
         the problem. Decryption runs on the fetch pool, so it is serial with

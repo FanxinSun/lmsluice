@@ -1440,6 +1440,41 @@ error **in this project's favour**. That is the pattern worth internalising: a
 number that flatters the thing you are building does not feel like a bug, so the
 arithmetic ceiling has to do the work that suspicion would otherwise do.
 
+### A short ctypes call caps threads and not processes
+
+Added 2026-09-04, from the encryption work, and generalised here because it
+will recur for every library this package reaches by `ctypes` — which is the
+project's standard way of reaching one, since it is what keeps "nothing
+installed" true.
+
+A foreign call releases the GIL and takes it back. When the call is short
+relative to that handoff, adding threads makes the work *slower*, and the cliff
+moves with the work per call rather than with the machine: AES-256-GCM
+decryption here fell from 7.6 GB/s on one thread to 0.19 on sixteen at 64 KiB
+a call, held to four threads at 1 MiB, and to eight at 8 MiB. The same work
+across *processes* scaled 15 → 99 GB/s on 1→8 workers, which is what identified
+the ceiling as the interpreter rather than the cipher or the memory system.
+
+Two consequences worth carrying forward. **A thread sweep alone cannot say what
+binds** — one configuration produces one curve and any story fits it; the
+process comparison differs in exactly one thing and settles it. And **a stage
+that reaches a library this way wants a different pool depth from one that
+waits on a device**: `probe.SEALED_FETCH` is 2 where the ordinary fetch depth is
+16, and the default of 16 cost 21% of a sealed load until it was measured.
+
+### A raw key file must never be stripped
+
+Added 2026-09-04. `bytes.strip()` removes 0x09, 0x0a, 0x0b, 0x0c, 0x0d and
+0x20, so `fh.read().strip()` on a 32-byte random key silently returns 31 bytes
+whenever the key happens to begin or end with one — about one key in twenty.
+
+It belongs here rather than in a changelog because of *how* it hides. Every
+test that uses a fixed key passes forever; the failure is intermittent, appears
+only in the field, and looks like a corrupted key file rather than a parser
+bug. The general form: **whitespace-trimming is a text operation, and applying
+it to bytes that are not text is a data-loss bug that testing with a constant
+cannot find.** Strip only after deciding the bytes are text.
+
 ### Checking where a number came from is not checking the number
 
 Added 2026-09-03, after publishing a wrong one while being careful about it.

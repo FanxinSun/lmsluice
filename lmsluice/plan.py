@@ -75,6 +75,7 @@ class Stage:
     nbytes: int
     rate: float | None                 # bytes/s, or None if never measured
     pool: str = ""                     # stages sharing a pool run serially
+    phase: str = ""                    # phases run one after another
 
     @property
     def seconds(self) -> float | None:
@@ -91,6 +92,7 @@ class Route:
     stages: tuple[Stage, ...]
     overlapped: bool = True
     note: str = ""
+    peak: int = 0                      # disk high-water, when it is not traffic
 
     @property
     def known(self) -> bool:
@@ -110,7 +112,30 @@ class Route:
             return None
         if not self.overlapped:
             return sum(s.seconds for s in self.stages)
-        return max(t for t, _ in self._pools())
+        return sum(max(t for t, _ in group) for group in self._phases())
+
+    def _phases(self):
+        """`_pools()`, cut into phases that run one after another.
+
+        Two levels, because a route can need both. Sealing a checkpoint is the
+        case that forced it: the archive is written in one pass whose encode
+        and write overlap, and then read back and encrypted in a second pass
+        that cannot start until the first has finished. One level could say
+        "all parallel" or "all serial" and both are wrong here -- the first by
+        making the second pass free, the second by charging for an overlap that
+        does happen.
+
+        A route that names no phase has one, so this changes nothing for any
+        route written before it existed.
+        """
+        order, groups = [], {}
+        for s in self.stages:
+            if s.phase not in groups:
+                order.append(s.phase)
+                groups[s.phase] = []
+        for t, slowest in self._pools():
+            groups[slowest.phase].append((t, slowest))
+        return [groups[name] for name in order if groups[name]]
 
     def _pools(self):
         """(seconds, slowest stage) per pool, summing the stages inside one.
@@ -143,6 +168,17 @@ class Route:
         return max(self._pools(), key=lambda p: p[0])[1].name
 
     @property
+    def peak_bytes(self) -> int:
+        """The disk high-water mark: what must exist at once, not in total.
+
+        `device_bytes` is traffic and answers "what does this cost to move".
+        This answers "will it fit", which is a different question with a
+        different answer -- a route that writes a file and then rewrites it
+        moves each byte twice and needs both copies on disk at the same moment.
+        """
+        return self.peak or self.device_bytes
+
+    @property
     def device_bytes(self) -> int:
         """Bytes that actually cross a link -- storage, network or PCIe.
 
@@ -170,11 +206,17 @@ class Decision:
         return self.chosen.name == "coded"
 
     def explain(self) -> str:
-        lines = [f"  {'route':<10} {'seconds':>9} {'GB moved':>9}  limited by"]
+        peaks = any(r.peak_bytes != r.device_bytes for r in self.routes)
+        head = (f"  {'route':<10} {'seconds':>9} {'GB moved':>9}"
+                + (f" {'GB on disk':>11}" if peaks else "")
+                + "  limited by")
+        lines = [head]
         for r in self.routes:
             secs = "unknown" if r.seconds is None else f"{r.seconds:.3f}"
             lines.append(f"  {r.name:<10} {secs:>9} "
-                         f"{r.device_bytes / 1e9:>9.2f}  {r.limited_by}"
+                         f"{r.device_bytes / 1e9:>9.2f}"
+                         + (f" {r.peak_bytes / 1e9:>11.2f}" if peaks else "")
+                         + f"  {r.limited_by}"
                          + (f"   ({r.note})" if r.note else ""))
         lines.append(f"  -> {self.chosen.name}: {self.why}")
         return "\n".join(lines)
@@ -227,8 +269,30 @@ def read_plan(plain_bytes: int, coded_bytes: int | None, *,
     return _decide(tuple(routes), source, decode, margin, "decode")
 
 
+def seal_rate(*, source: float | None, sink: float | None,
+              encrypt: float | None) -> float | None:
+    """How fast the sealing pass moves coded bytes, from the rates around it.
+
+    Derived rather than measured, because it is a serial loop over three things
+    this machine has already been measured on: read a unit, encrypt it, write
+    it. `sealed.seal_file` does exactly that and nothing concurrently, so the
+    reciprocals add. Stated this way it re-evaluates on another machine without
+    re-measuring -- a slow disk and a fast cipher give a different answer from
+    a fast disk and a phone-class one, and neither needs a new constant.
+
+    Checked against the development box: source 6.34, encrypt ~18 single
+    threaded, sink ~2 GB/s predicts 1.40 GB/s; sealing a 202 MB lmz archive
+    measured 1.24. Close enough to price a decision, and the gap is the
+    per-unit Python overhead the model does not carry.
+    """
+    if not source or not sink or not encrypt:
+        return None
+    return 1.0 / (1.0 / source + 1.0 / sink + 1.0 / encrypt)
+
+
 def write_plan(plain_bytes: int, ratio: float, *, sink: float | None,
-               encode: float | None, margin: float = MARGIN) -> Decision:
+               encode: float | None, margin: float = MARGIN,
+               seal: float | None = None) -> Decision:
     """Choose between writing a model plain and writing it coded.
 
     The mirror of `read_plan`, and worth having separately because the answer
@@ -236,12 +300,27 @@ def write_plan(plain_bytes: int, ratio: float, *, sink: float | None,
     on the same device, so a codec can clear the gate on the way out and miss
     it on the way in. That is the case for compressing training checkpoints on
     machines where compressing the weights you load would be a mistake.
+
+    `seal` enables the encrypted row, at the rate `seal_rate` gives. Encryption
+    is an envelope around a finished archive, so it is a **second pass**: the
+    archive is written, then read back and rewritten sealed. Both costs are
+    stated rather than absorbed -- the wall clock as its own phase, and the
+    disk high-water as `peak_bytes`, because a 70 GB checkpoint needs to know
+    it will hold two compressed copies at once before it starts, not after.
     """
     coded_bytes = int(plain_bytes * ratio)
-    routes = (Route("plain", (Stage("write", plain_bytes, sink),)),
+    routes = [Route("plain", (Stage("write", plain_bytes, sink),)),
               Route("coded", (Stage("encode", plain_bytes, encode),
-                              Stage("write", coded_bytes, sink))))
-    return _decide(routes, sink, encode, margin, "encode")
+                              Stage("write", coded_bytes, sink)))]
+    if seal:
+        routes.append(Route(
+            "sealed",
+            (Stage("encode", plain_bytes, encode, phase="code"),
+             Stage("write", coded_bytes, sink, phase="code"),
+             Stage("seal", coded_bytes, seal, phase="seal")),
+            note="a second pass; holds both copies",
+            peak=coded_bytes * 2))
+    return _decide(tuple(routes), sink, encode, margin, "encode")
 
 
 def _decide(routes, device: float | None, codec: float | None,

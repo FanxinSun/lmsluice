@@ -174,6 +174,14 @@ The one thing encryption takes away is `mmap`: there is no arrangement of page
 tables that decrypts, so a sealed archive can never take the zero-copy route
 however fast the disk is.
 
+**Writing one costs a second pass, and `lmsluice write --seal` says so first.**
+The envelope wraps a finished archive, so the file is written and then read
+back and rewritten sealed: both copies exist at once. That is the price of
+covering an lmz archive without editing lmz, and the plan states both terms —
+the extra wall clock as its own phase, and the disk high-water as a column of
+its own — so a 70 GB checkpoint sees the cost before it starts rather than when
+the volume fills.
+
 ## The one ratio
 
 Compression is free on a path when the decoder is faster than the link it is
