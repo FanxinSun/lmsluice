@@ -88,24 +88,70 @@ class DecryptionFailed(ValueError):
     """A tag did not verify. The plaintext is never returned in this case."""
 
 
-def _load_openssl():
-    import ctypes.util
+def _candidates() -> list:
+    """Where to look for libcrypto, and on macOS where never to look.
 
-    names = [ctypes.util.find_library("crypto"), "libcrypto.so.3",
-             "libcrypto.so.1.1", "libcrypto.so", "libcrypto.dylib",
-             "libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll"]
-    for name in names:
+    **macOS aborts the process** if a program dlopens `/usr/lib/libcrypto.dylib`
+    — Apple ships that path as a compatibility shim over LibreSSL, not as a
+    library to link, and the dyld guard prints "loading libcrypto in an unsafe
+    way" and raises SIGABRT. Not an exception: `SIGABRT`, which no `try` can
+    catch and which takes the interpreter with it.
+
+    `ctypes.util.find_library("crypto")` returns exactly that path on macOS, so
+    the obvious implementation is the fatal one. It was, until CI ran on
+    macos-latest and the suite died with `Abort trap: 6` — on a machine this
+    project has, and on a path no Linux run can reach.
+
+    So on Darwin the system paths are excluded by name and only a real OpenSSL
+    installation is tried. Finding none is fine: encryption reports `none` and
+    everything else works.
+    """
+    import ctypes.util
+    import sys
+
+    if sys.platform == "darwin":
+        # Homebrew on Apple silicon, Homebrew on Intel, MacPorts, then a
+        # generic prefix. Never anything under /usr/lib.
+        return ["/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib",
+                "/opt/homebrew/opt/openssl@1.1/lib/libcrypto.dylib",
+                "/usr/local/opt/openssl@3/lib/libcrypto.dylib",
+                "/usr/local/opt/openssl@1.1/lib/libcrypto.dylib",
+                "/opt/local/lib/libcrypto.dylib"]
+    found = ctypes.util.find_library("crypto")
+    return [found, "libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so",
+            "libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libeay32.dll"]
+
+
+def _load_openssl():
+    # First, symbols already in this process. `import ssl` has loaded libcrypto
+    # as a dependency, and asking the process for its own symbols dlopens
+    # nothing -- so where it works it is both the fastest path and the one that
+    # cannot trip a dyld guard. It often does not work, because CPython loads
+    # extension modules with RTLD_LOCAL, so it is a try and not a plan.
+    try:
+        import ssl                        # noqa: F401 -- for the side effect
+    except ImportError:
+        pass
+    try:
+        lib = ctypes.CDLL(None)
+        _bind_openssl(lib)
+        return lib, "already loaded in this process"
+    except (AttributeError, OSError, TypeError):
+        pass
+
+    for name in _candidates():
         if not name:
             continue
-        try:
-            lib = ctypes.CDLL(name)
-        except OSError:
-            continue
-        try:
-            _bind_openssl(lib)
-        except AttributeError:
-            continue
-        return lib, name
+        if not os.path.isabs(name) or os.path.exists(name):
+            try:
+                lib = ctypes.CDLL(name)
+            except OSError:
+                continue
+            try:
+                _bind_openssl(lib)
+            except AttributeError:
+                continue
+            return lib, name
     return None, ""
 
 
