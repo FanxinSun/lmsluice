@@ -328,7 +328,7 @@ Rows are capabilities; a blank means the tool does not have it.
 | **lossless compression** | ✅ | | | | | ✅ | dedup only | |
 | **no install required** | ✅ (stdlib zstd) | | | | | | | |
 | decode on GPU | ✅ (lmz CUDA) | | | | n/a | | | |
-| GPUDirect Storage | | | | | ✅ | | | |
+| GPUDirect Storage | ❌ *decided against — see below* | | | | ✅ | | | |
 | **returns torch tensors** | ✅ (optional extra) | ✅ | ✅ | ✅ | ✅ | ✅ | n/a | ✅ |
 | vLLM integration | ✅ (`--load-format lmsluice`, run-verified) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | pip-installable | ✅ (built, unpublished) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -341,9 +341,24 @@ Rows are capabilities; a blank means the tool does not have it.
 | runs with no GPU / no CUDA | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
 | runs on a phone-class device | ✅ (stdlib) | ✅ | | | | | | |
 
-The three rows in bold that only lmsluice has are the product. The two ❌ rows
-in the middle — no tensors, not installable — are why nobody can use it, and
-they are `strategy.md`'s Phase A, which remains correctly placed.
+The three rows in bold that only lmsluice has are the product. The two rows
+that used to read ❌ — no tensors, not installable — were why nobody could use
+it; both are closed, and the vLLM row with them.
+
+**The one remaining ❌ is a decision rather than a gap.** GPUDirect Storage
+needs the `nvidia-fs` kernel module and a GPU on NVIDIA's supported list. This
+project's development box is WSL2, where `nvidia-fs` is unavailable, on a
+GeForce 5080, which is not on that list even on bare metal; the only other
+machine it runs on is an Apple silicon Mac with no NVIDIA GPU at all. So it
+could be written but never exercised, and a feature no machine here can run is
+dead code attached to a claim nobody can check.
+
+It is also aimed away from the product. GDS is a fast-link technology —
+fastsafetensors uses it to move *uncompressed* weights at 26.4 GB/s — and on a
+link that fast this project's own gate says do not compress. The place it would
+agree with the thesis is the device-decode route, sending *coded* bytes straight
+to VRAM, and that remains the shape to build if a machine ever exists to verify
+it on. Until then the row says no and says why, which is the honest state.
 
 ---
 
