@@ -4,8 +4,9 @@ __pycache__/
 log.txt
 results/
 
-# Built by devdecode.py on first use if nvcc is present.
-lmsluice/*.ptx
+# `lmsluice/lmz_merge.ptx` is deliberately NOT ignored: it is prebuilt for
+# sm_52 and shipped in the wheel, so a machine with a driver and no CUDA
+# toolkit still gets the device decode path. See pyproject's package-data.
 dist/
 build/
 *.egg-info/

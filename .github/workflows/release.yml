@@ -1,0 +1,125 @@
+name: release
+
+# Publishing is a tag push and nothing else. There is no API token anywhere --
+# not in the repository, not on a laptop, not in a secret. PyPI's trusted
+# publishing verifies a short-lived OIDC identity issued by GitHub for this
+# exact repository, workflow and environment, so there is no long-lived
+# credential to leak, rotate or accidentally commit. Same arrangement as lmz.
+#
+# One-time setup, and WHICH form depends on whether the project exists yet.
+# Getting this wrong fails with `invalid-publisher`: a valid token that matches
+# no publisher. Nothing uploads, so the version is not burned and the failed
+# job can simply be re-run once the publisher is right.
+#
+# Before the first release, when the name is unclaimed -- pypi.org -> Your
+# projects -> Publishing -> Add a pending publisher. A pending publisher only
+# applies to a project that does not exist; once lmsluice is on PyPI it is the
+# wrong form and will never match.
+#
+# For a project that already exists -- pypi.org -> Your projects -> lmsluice ->
+# Manage -> Publishing -> Add a new publisher (GitHub):
+#
+#     Owner             : FanxinSun
+#     Repository name   : lmsluice
+#     Workflow name     : release.yml
+#     Environment name  : pypi
+#
+# Those four have to match the OIDC claims exactly. The failed run prints the
+# claims it actually sent, which is the thing to compare against.
+#
+# After that:  git tag v0.2.0 && git push origin v0.2.0
+# Or, if the tag already exists:  gh run rerun <run-id> --failed
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tag and the packaged version must agree, or the release is a lie
+      # about which code it contains -- and PyPI will not let it be corrected
+      # afterwards, because a version number can never be reused. The version
+      # lives in `lmsluice/__init__.py` and pyproject reads it from there, so
+      # this reads it from the same place rather than from a second literal.
+      - name: Tag must match the packaged version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(python -c "import re;print(re.search(r'^__version__ = \"(.+)\"', open('lmsluice/__init__.py').read(), re.M).group(1))")
+          echo "tag=$TAG packaged=$PKG"
+          test "$TAG" = "$PKG" || { echo "::error::tag v$TAG != version $PKG"; exit 1; }
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      # A wheel is not the source tree. This package promises to work with
+      # nothing installed and to ship a prebuilt PTX so that a machine with a
+      # driver and no CUDA toolkit still has a device route -- both are
+      # properties of the built artifact, and neither is visible from a test
+      # run in the checkout.
+      - name: The wheel must work away from the source tree
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install --quiet dist/*.whl
+          cd /tmp && /tmp/v/bin/python -c "
+          import hashlib, json, os, struct, random, tempfile
+          import lmsluice
+          from lmsluice.zstdcodec import encoder
+          from lmsluice.model import Model
+          d = tempfile.mkdtemp(); rnd = random.Random(2)
+          hdr, off, body = {}, 0, bytearray()
+          for i in range(8):
+              nb = 65536
+              body += bytes(b for _ in range(nb // 2) for b in (rnd.getrandbits(8), 0x3E))
+              hdr[f'blk.{i}.weight'] = {'dtype': 'BF16', 'shape': [nb // 2],
+                                        'data_offsets': [off, off + nb]}
+              off += nb
+          blob = json.dumps(hdr, separators=(',', ':')).encode()
+          blob += b' ' * ((8 - len(blob) % 8) % 8)
+          src = os.path.join(d, 'm.safetensors')
+          open(src, 'wb').write(struct.pack('<Q', len(blob)) + blob + bytes(body))
+          coded = os.path.join(d, 'm.lmsl'); encoder().encode(src, coded)
+          h = lambda b: hashlib.sha256(b).hexdigest()
+          with Model(coded) as m:
+              assert h(bytes(m.load())) == h(open(src, 'rb').read()), 'not byte-identical'
+          import lmsluice.devdecode as dd, os.path as P
+          ptx = P.join(P.dirname(lmsluice.__file__), 'lmz_merge.ptx')
+          assert P.exists(ptx), 'the prebuilt PTX is missing from the wheel'
+          from lmsluice import crypt, sign
+          assert sign.sigv4_headers(method='GET', url='https://b.s3.amazonaws.com/k',
+                                    region='us-east-1', access_key='A', secret_key='S')
+          print('round trip OK', lmsluice.__version__, '| crypto:', crypt.backend()[0],
+                '| ptx:', os.path.getsize(ptx), 'bytes')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # the only thing trusted publishing needs
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -11,6 +11,7 @@ dynamic = ["version"]
 description = "Decide, per machine, whether decoding a model archive beats reading a plain file — and then do the faster one"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 keywords = ["llm", "model-loading", "compression", "safetensors", "inference"]
 classifiers = [
@@ -73,7 +74,10 @@ lmsluice = "lmsluice.cli:main"
 lmsluice = "lmsluice.vllmloader:register"
 
 [project.urls]
-Documentation = "https://github.com/yfce/lmsluice/blob/main/README.md"
+Homepage = "https://github.com/FanxinSun/lmsluice"
+Repository = "https://github.com/FanxinSun/lmsluice"
+Documentation = "https://github.com/FanxinSun/lmsluice/blob/master/README.md"
+Issues = "https://github.com/FanxinSun/lmsluice/issues"
 
 [tool.setuptools]
 packages = ["lmsluice"]

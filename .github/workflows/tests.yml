@@ -1,0 +1,124 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes anything back, so the token gets read access and no more.
+permissions:
+  contents: read
+
+# A push that supersedes an in-flight run cancels it rather than paying for
+# both; the older answer is worthless the moment a newer commit exists.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# This package's whole claim is that it needs nothing installed and decides
+# per machine. Both halves are things CI can actually check, and neither is
+# checkable by reading the README:
+#
+#   - `pip install .` with no extras, on every interpreter the package says it
+#     supports, and then the suite. A stray `import torch`, `import boto3` or
+#     `from cryptography import ...` at module scope retires a published claim
+#     silently; source-walking tests catch the import, and this catches the
+#     transitive one.
+#   - Windows and macOS, because the storage layer is where the platforms
+#     actually differ -- `posix_fadvise` is Linux, `F_NOCACHE` is macOS, and
+#     `FILE_FLAG_NO_BUFFERING` is Windows. Each was written from a
+#     specification and each was wrong the first time it ran.
+jobs:
+  test:
+    name: python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # Extra combinations rather than a second dimension: the interpreter
+        # sweep is about Python and needs one machine; these are about the
+        # machine and need one interpreter. macos-latest is Apple Silicon,
+        # which is the only job that exercises `fcntl(F_NOCACHE)` and unified
+        # memory; windows-latest is the only one that runs the unbuffered-read
+        # path. On 3.14 the standard library has zstd, so those two jobs also
+        # cover the codec that needs nothing installed.
+        include:
+          - os: macos-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Two separate claims, checked separately, because one step cannot
+      # honestly make both. Installing proves the package installs and pulls
+      # nothing in with it. The suite then runs from the repository, where
+      # `python -m unittest` imports the tree rather than the install -- which
+      # is what the source-walking tests need, since they are assertions about
+      # the source. Whether the *installed* artifact works is a different
+      # question and is asked below, from a different directory.
+      - name: Install with no extras at all
+        run: python -m pip install --disable-pip-version-check .
+
+      - name: Nothing came along with it
+        shell: bash
+        run: |
+          python -m pip list --format=freeze | sort > /tmp/after.txt
+          cat /tmp/after.txt
+          ! grep -qiE "^(torch|boto3|botocore|google-|azure-|cryptography|requests|numpy|zstandard|lmzip)" /tmp/after.txt
+
+      - name: The suite
+        run: python -m unittest discover -s tests -v
+
+      # From somewhere else, so the import cannot come from the checkout: an
+      # import that works only because the working directory happens to be the
+      # source root is a bug users meet and developers never do.
+      - name: The installed package works away from the tree
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -c "
+          import lmsluice, os
+          assert os.path.dirname(lmsluice.__file__) != os.getcwd()
+          from lmsluice import cloud, crypt, gate, plan, sign, source
+          print('imported from', lmsluice.__file__)
+          "
+          lmsluice --version
+          lmsluice doctor
+
+      - name: The CLI answers on a real archive
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, struct, subprocess, sys, tempfile, random
+          d = tempfile.mkdtemp()
+          rnd = random.Random(1)
+          hdr, off, body = {}, 0, bytearray()
+          for i in range(8):
+              nb = 65536
+              body += bytes(b for _ in range(nb // 2)
+                            for b in (rnd.getrandbits(8), 0x3E))
+              hdr[f"blk.{i}.weight"] = {"dtype": "BF16", "shape": [nb // 2],
+                                        "data_offsets": [off, off + nb]}
+              off += nb
+          blob = json.dumps(hdr, separators=(",", ":")).encode()
+          blob += b" " * ((8 - len(blob) % 8) % 8)
+          src = os.path.join(d, "model.safetensors")
+          with open(src, "wb") as fh:
+              fh.write(struct.pack("<Q", len(blob)) + blob + bytes(body))
+          from lmsluice.zstdcodec import encoder
+          coded = os.path.join(d, "model.lmsl")
+          encoder().encode(src, coded)
+          out = os.path.join(d, "back.safetensors")
+          subprocess.run([sys.executable, "-m", "lmsluice", "get", coded, out],
+                         check=True)
+          a = open(src, "rb").read(); b = open(out, "rb").read()
+          assert a == b, "the round trip through the CLI was not byte-identical"
+          print("round trip OK:", len(a), "bytes")
+          PY

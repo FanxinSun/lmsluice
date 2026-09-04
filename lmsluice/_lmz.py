@@ -16,8 +16,10 @@ from __future__ import annotations
 import os
 import sys
 
-HINT = ("lmz is not importable. Either install it (pip install lmzip) or put "
-        "a checkout next to this one, as YFCE/lmz.")
+HINT = ("lmz is not importable, so the better ratios and the CUDA decoder are "
+        "unavailable; the stdlib zstd codec still works. Install it with "
+        "`pip install lmzip`, or put an lmz checkout in the directory "
+        "containing this package.")
 
 
 def lmz():

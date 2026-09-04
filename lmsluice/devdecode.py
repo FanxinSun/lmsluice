@@ -281,16 +281,22 @@ class DeviceDecoder:
             self.lib, self.why = None, f"the merge kernel would not load: {exc}"
 
     def _ptx(self) -> bytes | None:
-        """The merge kernel, compiled once if nvcc is here.
+        """The merge kernel: the shipped PTX, or nvcc, or no device route.
 
-        Built beside the package and gitignored, which is the bargain lmz
-        already makes with a C compiler and with nvcc. No nvcc means no device
-        route, not a failure: the host routes are unaffected and say so.
+        A prebuilt PTX is **in the wheel**, targeting `sm_52` so the driver
+        JITs it forward onto everything newer -- which is the whole point, and
+        the reason it is not built for this machine's architecture. A user with
+        a driver and no CUDA toolkit is the common case, not the exotic one;
+        requiring nvcc would have made the device route a developer feature.
+
+        Rebuilt only when the source is genuinely newer, which happens in a
+        checkout being worked on and not in an install.
         """
         here = os.path.dirname(os.path.abspath(__file__))
         ptx, src = os.path.join(here, PTX_NAME), os.path.join(here, SOURCE_NAME)
-        if os.path.exists(ptx) and (not os.path.exists(src)
-                                    or os.path.getmtime(ptx) >= os.path.getmtime(src)):
+        have = os.path.exists(ptx)
+        if have and (not os.path.exists(src)
+                     or os.path.getmtime(ptx) >= os.path.getmtime(src)):
             with open(ptx, "rb") as fh:
                 return fh.read()
         import shutil
@@ -298,6 +304,13 @@ class DeviceDecoder:
 
         nvcc = shutil.which("nvcc") or "/usr/local/cuda/bin/nvcc"
         if not os.path.exists(nvcc) and shutil.which("nvcc") is None:
+            if have:
+                # A shipped PTX that looks stale beats no device route at all.
+                # `pip install` gives every file the same timestamp, so which
+                # of the two looks newer is an accident of unpacking order --
+                # and losing the device path to that would be absurd.
+                with open(ptx, "rb") as fh:
+                    return fh.read()
             self.why = "no nvcc, so the merge kernel cannot be built"
             return None
         try:
