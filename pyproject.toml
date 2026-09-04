@@ -43,12 +43,22 @@ torch = ["torch>=2.0"]
 # where that is not true is a `pip install lmsluice[crypt]` rather than a
 # missing feature. `lmsluice doctor` names whichever backend is live.
 crypt = ["cryptography>=42"]
+# Object storage needs none of these: S3, GCS and Azure Blob are read by
+# signing an HTTPS range GET with `hmac` and `hashlib` (see `lmsluice/sign.py`),
+# and a test walks the source to keep it that way. The SDKs are here only for
+# credential *sources* the standard library cannot reach -- instance-metadata
+# and IAM roles, service-account JWTs needing RS256, managed identity -- and
+# the request is still signed and sent by this package either way.
+s3 = ["boto3>=1.34"]
+gcs = ["google-auth>=2.0"]
+azure = ["azure-identity>=1.15"]
 # Nothing to install: the CUDA path talks to the driver API through ctypes and
 # imports no CUDA package at all. The extra exists so that anyone who types it
 # out of habit gets a working install rather than an error, and so this comment
 # has somewhere to live.
 cuda = []
-all = ["lmzip>=1.3.0", "torch>=2.0", "cryptography>=42"]
+all = ["lmzip>=1.3.0", "torch>=2.0", "cryptography>=42", "boto3>=1.34",
+       "google-auth>=2.0", "azure-identity>=1.15"]
 
 [project.scripts]
 lmsluice = "lmsluice.cli:main"

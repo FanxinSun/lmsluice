@@ -273,27 +273,56 @@ class HttpSource(Source):
     whole body for no reason.
     """
 
-    def __init__(self, url: str, *, timeout: float = 30.0, headers=None):
+    def __init__(self, url: str, *, timeout: float = 30.0, headers=None,
+                 signer=None, range_header: str = "Range"):
         self.name = url
         self.url = url
         self.timeout = timeout
         self.headers = dict(headers or {})
+        # `signer(method, url, headers) -> headers` authorises one request.
+        # A callable and not a credential, so this class never holds a secret
+        # and an object store is the same code as a public URL plus a
+        # signature. Azure names its range header differently, which is the
+        # only other thing that varies across the three.
+        self._signer = signer
+        self.range_header = range_header
         self._local = threading.local()
         self.size, self.random_access = self._head()
 
+    def _sign(self, method: str, extra: dict | None = None) -> dict:
+        """Headers for one request, signed where a signer is in play.
+
+        Signed per request rather than once at open: SigV4 and Shared Key both
+        cover the range header, so every read has a different signature, and
+        both carry a timestamp that a long-lived load would age out of.
+        """
+        headers = {**self.headers, **(extra or {})}
+        if self._signer is None:
+            return headers
+        return self._signer(method, self.url, headers)
+
     def _head(self) -> tuple[int, bool]:
-        """(size, whether ranges work), settled by asking for one byte."""
+        """(size, whether ranges work), settled by asking for one byte.
+
+        `head_error` records why the one-byte GET failed, when it did. A server
+        that refuses HEAD is ordinary and says nothing; a server that cannot be
+        reached at all, or that refuses the credentials, is not -- and without
+        this it produced a source of size zero that failed much later with a
+        message about the archive rather than about the connection.
+        """
         size = 0
+        self.head_error = None
         try:
             req = urllib.request.Request(self.url, method="HEAD",
-                                         headers=self.headers)
+                                         headers=self._sign("HEAD"))
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 size = int(r.headers.get("Content-Length") or 0)
         except Exception:                 # noqa: BLE001 -- HEAD is often refused
             pass
         try:
             req = urllib.request.Request(
-                self.url, headers={**self.headers, "Range": "bytes=0-0"})
+                self.url,
+                headers=self._sign("GET", {self.range_header: "bytes=0-0"}))
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 body = r.read(2)
                 if r.status == 206 and len(body) == 1:
@@ -303,7 +332,8 @@ class HttpSource(Source):
                     return size, True
                 # 200 with the whole body: the server ignored the range.
                 return (size or int(r.headers.get("Content-Length") or 0)), False
-        except Exception:                 # noqa: BLE001
+        except Exception as exc:          # noqa: BLE001
+            self.head_error = exc
             return size, False
 
     def _conn(self) -> http.client.HTTPConnection:
@@ -340,9 +370,9 @@ class HttpSource(Source):
     def pread(self, offset: int, length: int) -> bytes:
         if not self.random_access:
             raise OSError(f"{self.url}: server does not serve byte ranges")
-        headers = {**self.headers,
-                   "Range": f"bytes={offset}-{offset + length - 1}",
-                   "Accept-Encoding": "identity", "Connection": "keep-alive"}
+        headers = self._sign("GET", {
+            self.range_header: f"bytes={offset}-{offset + length - 1}",
+            "Accept-Encoding": "identity", "Connection": "keep-alive"})
         # One retry, because a kept-alive connection can be closed by the far
         # end between requests and that is not an error -- it is the normal
         # end of an idle keep-alive, and the fix is to dial again rather than
@@ -443,6 +473,14 @@ def open_source(target: str, **kw) -> Source:
     carry a second code path for the servers that are awkward.
     """
     parsed = urllib.parse.urlparse(target)
+    # Object stores first, and by scheme rather than by sniffing: `s3://` is
+    # unambiguous where a hostname is not. They land back on `HttpSource` with
+    # a signature, so everything below this line is the same code path a
+    # public URL takes -- which is the whole claim `cloud.py` makes.
+    if parsed.scheme in ("s3", "gs", "gcs", "az", "azure", "abfs", "abfss"):
+        from .cloud import open_cloud
+
+        return open_cloud(target, **kw)
     if parsed.scheme in ("http", "https"):
         src = HttpSource(target, **kw)
         return src if src.random_access else CachedSource(src)

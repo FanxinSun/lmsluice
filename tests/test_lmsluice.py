@@ -19,7 +19,11 @@ import os
 import shutil
 import random
 import struct
+import urllib.parse
+import datetime as DT
 import zlib
+
+from lmsluice import sign as SIGN
 import sys
 import tempfile
 import threading
@@ -426,6 +430,137 @@ class _serve:
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.srv.serve_forever,
                                        daemon=True)
+        self.thread.start()
+        return f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def __exit__(self, *_exc):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class _fake_store:
+    """A local object store that checks the signature, for a with-block.
+
+    Enough of each protocol to prove the client, and no more: it re-derives the
+    signature from the request it actually received and compares, so a client
+    that signs the wrong canonical form fails here rather than against a real
+    bucket. It answers `HEAD`, serves `Range` and `x-ms-range`, and rejects an
+    unsigned request when a key is configured.
+
+    Serving the bytes is the easy half and would pass with no signing at all.
+    Re-deriving the signature is the half that makes this a test.
+    """
+
+    def __init__(self, directory, cloud="s3", key=None, account="acct",
+                 require_auth=True):
+        self.directory = directory
+        self.cloud, self.key, self.account = cloud, key, account
+        self.require_auth = require_auth
+        self.seen = []
+
+    def __enter__(self):
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _blob(self):
+                name = os.path.basename(urllib.parse.urlparse(self.path).path)
+                full = os.path.join(outer.directory, name)
+                if not os.path.exists(full):
+                    return None
+                with open(full, "rb") as fh:
+                    return fh.read()
+
+            def _authorised(self):
+                got = self.headers.get("Authorization")
+                outer.seen.append({k.lower(): v for k, v in self.headers.items()})
+                if not outer.require_auth:
+                    return True
+                if not got:
+                    return False
+                url = f"http://{self.headers.get('Host')}{self.path}"
+                sent = {k: v for k, v in self.headers.items()
+                        if k.lower() != "authorization"}
+                if outer.cloud == "azure":
+                    want = SIGN.shared_key_header(
+                        method=self.command, url=url, account=outer.account,
+                        key=outer.key,
+                        headers={k: v for k, v in sent.items()
+                                 if k.lower().startswith("x-ms-")})
+                else:
+                    stamp = self.headers.get("x-amz-date")
+                    when = DT.datetime.strptime(
+                        stamp, "%Y%m%dT%H%M%SZ").replace(
+                            tzinfo=DT.timezone.utc)
+                    signed = got.split("SignedHeaders=")[1].split(",")[0]
+                    # Region and service come out of the Credential scope the
+                    # client sent, not from a constant here: GCS signs with
+                    # region "auto" and hardcoding "us-east-1" would have made
+                    # this fake reject a correct request.
+                    scope = got.split("Credential=")[1].split(",")[0].split("/")
+                    want = SIGN.sigv4_headers(
+                        method=self.command, url=url, region=scope[2],
+                        service=scope[3], access_key=scope[0],
+                        secret_key=outer.key,
+                        headers={k: v for k, v in sent.items()
+                                 if k.lower() in signed.split(";")
+                                 and not k.lower().startswith(("x-amz-", "host"))},
+                        when=when)
+                return want["Authorization"] == got
+
+            def _deny(self):
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_HEAD(self):
+                body = self._blob()
+                if body is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if not self._authorised():
+                    return self._deny()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+
+            def do_GET(self):
+                body = self._blob()
+                if body is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                if not self._authorised():
+                    return self._deny()
+                rng = (self.headers.get("Range")
+                       or self.headers.get("x-ms-range"))
+                if not rng:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                lo, _, hi = rng.split("=", 1)[1].partition("-")
+                lo = int(lo)
+                hi = int(hi) if hi else len(body) - 1
+                cut = body[lo:hi + 1]
+                self.send_response(206)
+                self.send_header("Content-Length", str(len(cut)))
+                self.send_header("Content-Range",
+                                 f"bytes {lo}-{lo + len(cut) - 1}/{len(body)}")
+                self.end_headers()
+                self.wfile.write(cut)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self.thread.start()
         return f"http://127.0.0.1:{self.srv.server_address[1]}"
 
@@ -2874,6 +3009,371 @@ class TestEncryptionStaysOutOfTheCodecs(unittest.TestCase):
                 if mod not in stdlib and mod != "cryptography":
                     bad.append(s)
         self.assertEqual(bad, [], "crypt.py must need nothing installed")
+
+
+# -- object storage --------------------------------------------------------
+
+class TestSigning(unittest.TestCase):
+    """Known-answer tests against each vendor's own published example.
+
+    These are the tests that matter for signing, because a signature is either
+    byte-exact or worthless and nothing in between is observable: a wrong
+    canonical form produces a well-formed header that is always rejected, with
+    no clue as to which of a dozen rules was misread. A round trip against a
+    fake I also wrote would only prove I was consistent with myself.
+    """
+
+    AK = "AKIAIOSFODNN7EXAMPLE"
+    SK = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    WHEN = DT.datetime(2013, 5, 24, tzinfo=DT.timezone.utc)
+
+    def sig(self, url, headers=None):
+        h = SIGN.sigv4_headers(
+            method="GET", url=url, region="us-east-1", service="s3",
+            access_key=self.AK, secret_key=self.SK, headers=headers,
+            when=self.WHEN)
+        return h["Authorization"].rsplit("Signature=", 1)[1]
+
+    def test_aws_get_object_with_a_range(self):
+        """AWS, "Signature Calculations -- Transferring Payload in a Single
+        Chunk", Example: GET Object. This is the exact request shape this
+        package sends on every read."""
+        self.assertEqual(
+            self.sig("https://examplebucket.s3.amazonaws.com/test.txt",
+                     {"Range": "bytes=0-9"}),
+            "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41")
+
+    def test_aws_query_parameter_with_an_empty_value(self):
+        """`?lifecycle` signs as `lifecycle=`. The trailing `=` is easy to omit
+        and produces a signature that is wrong only for URLs with a valueless
+        parameter, which is a bug that hides until it does not."""
+        self.assertEqual(
+            self.sig("https://examplebucket.s3.amazonaws.com/?lifecycle"),
+            "fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543")
+
+    def test_aws_query_parameters_are_sorted(self):
+        self.assertEqual(
+            self.sig("https://examplebucket.s3.amazonaws.com/?max-keys=2&prefix=J"),
+            "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7")
+
+    def test_s3_paths_are_not_normalised(self):
+        """`a//b`, `a/./b` and `a/b` are three different object keys. A
+        signature over a tidied path authorises a request for a different
+        object, so S3's rule is to leave the path alone -- and the generic
+        rule, which does normalise, must still be available for the services
+        that use it."""
+        raw = SIGN.canonical_uri("/x/./y//z")
+        self.assertEqual(raw, "/x/./y//z")
+        self.assertEqual(SIGN.canonical_uri("/x/./y//z", normalise=True),
+                         "/x/y//z")
+        self.assertEqual(SIGN.canonical_uri("/a b+c"), "/a%20b%2Bc")
+
+    def test_azure_string_to_sign_matches_the_documented_example(self):
+        """Microsoft, "Authorize with Shared Key". The HMAC is `hmac` and
+        cannot be wrong; the canonical form is the part that can, so that is
+        what is pinned -- byte for byte, including the twelve positional lines
+        and the query parameters appended lowercased and sorted."""
+        self.assertEqual(
+            SIGN.azure_string_to_sign(
+                "GET", "myaccount", "/mycontainer",
+                "restype=container&comp=list&timeout=20",
+                {"x-ms-date": "Fri, 26 Jun 2015 23:39:12 GMT",
+                 "x-ms-version": "2015-02-21"}),
+            "GET\n\n\n\n\n\n\n\n\n\n\n\n"
+            "x-ms-date:Fri, 26 Jun 2015 23:39:12 GMT\n"
+            "x-ms-version:2015-02-21\n"
+            "/myaccount/mycontainer\ncomp:list\nrestype:container\ntimeout:20")
+
+    def test_azure_content_length_zero_signs_as_empty(self):
+        """Changed in API version 2015-02-21 and the single most common cause
+        of a 403 against a correct key."""
+        s = SIGN.azure_string_to_sign("GET", "a", "/c/b", "",
+                                      {"Content-Length": "0"})
+        self.assertEqual(s.split("\n")[3], "")
+
+    def test_azure_repeated_query_parameters_join_sorted_with_commas(self):
+        s = SIGN.canonical_azure_resource("a", "/c", "k=2&k=1&j=x")
+        self.assertEqual(s, "/a/c\nj:x\nk:1,2")
+
+    def test_the_azure_key_is_decoded_before_it_keys_the_hmac(self):
+        """Azure publishes the account key as base64 everywhere. Signing with
+        the base64 *text* gives a well-formed header that is always rejected,
+        which reads as a wrong key rather than as a bug."""
+        import base64 as b64
+        import hashlib
+        import hmac as _hmac
+
+        raw = bytes(range(32))
+        key = b64.b64encode(raw).decode()
+        h = SIGN.shared_key_header(
+            method="GET", url="https://a.blob.core.windows.net/c/b",
+            account="a", key=key,
+            when=DT.datetime(2020, 1, 1, tzinfo=DT.timezone.utc))
+        to_sign = SIGN.azure_string_to_sign(
+            "GET", "a", "/c/b", "",
+            {k: v for k, v in h.items() if k.lower().startswith("x-ms-")})
+        want = b64.b64encode(_hmac.new(raw, to_sign.encode(),
+                                       hashlib.sha256).digest()).decode()
+        self.assertEqual(h["Authorization"], f"SharedKey a:{want}")
+
+    def test_a_session_token_is_signed_and_not_merely_sent(self):
+        """A temporary credential's token is part of the canonical request. A
+        client that sends it unsigned works against nothing."""
+        h = SIGN.sigv4_headers(
+            method="GET", url="https://b.s3.amazonaws.com/k", region="us-east-1",
+            access_key=self.AK, secret_key=self.SK, token="TOKEN",
+            when=self.WHEN)
+        self.assertIn("x-amz-security-token", h["Authorization"])
+        self.assertEqual(h["x-amz-security-token"], "TOKEN")
+
+
+class TestCloudSources(unittest.TestCase):
+    """The three stores, against a fake that re-derives every signature."""
+
+    KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    AZKEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.data = os.urandom(200_000)
+        with open(os.path.join(self.dir, "blob.bin"), "wb") as fh:
+            fh.write(self.data)
+        self.saved = {k: os.environ.get(k) for k in (
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+            "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+            "LMSLUICE_S3_ENDPOINT", "LMSLUICE_GCS_ENDPOINT",
+            "LMSLUICE_AZURE_ENDPOINT", "AZURE_STORAGE_ACCOUNT",
+            "AZURE_STORAGE_KEY", "AZURE_STORAGE_SAS_TOKEN",
+            "AZURE_STORAGE_CONNECTION_STRING", "GCS_HMAC_ACCESS_KEY",
+            "GCS_HMAC_SECRET", "GOOGLE_OAUTH_ACCESS_TOKEN",
+            "GOOGLE_APPLICATION_CREDENTIALS")}
+        for k in self.saved:
+            os.environ.pop(k, None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_s3_reads_ranges_through_a_signature_checking_store(self):
+        from lmsluice.source import open_source
+
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.dir, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with open_source("s3://bucket/blob.bin") as s:
+                self.assertEqual(s.size, len(self.data))
+                self.assertTrue(s.random_access)
+                self.assertEqual(s.pread(4096, 128), self.data[4096:4224])
+                self.assertEqual(s.pread(0, 64), self.data[:64])
+                self.assertEqual(s.cloud, "s3")
+                self.assertEqual(s.mode, "stdlib")
+                self.assertFalse(s.anonymous)
+
+    def test_gcs_hmac_is_the_same_signature_at_a_different_host(self):
+        """The finding that made GCS cost nothing: its XML API accepts SigV4,
+        so an HMAC key pair is the S3 path with the host changed."""
+        from lmsluice.source import open_source
+
+        os.environ.update(GCS_HMAC_ACCESS_KEY="AK", GCS_HMAC_SECRET=self.KEY)
+        with _fake_store(self.dir, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_GCS_ENDPOINT"] = base
+            with open_source("gs://bucket/blob.bin") as s:
+                self.assertEqual(s.pread(1024, 256), self.data[1024:1280])
+                self.assertEqual(s.cloud, "gcs")
+                self.assertEqual(s.auth, "hmac")
+
+    def test_azure_shared_key_and_the_x_ms_range_header(self):
+        from lmsluice.source import open_source
+
+        os.environ.update(AZURE_STORAGE_ACCOUNT="acct",
+                          AZURE_STORAGE_KEY=self.AZKEY)
+        store = _fake_store(self.dir, "azure", key=self.AZKEY, account="acct")
+        with store as base:
+            os.environ["LMSLUICE_AZURE_ENDPOINT"] = base
+            with open_source("az://acct/cont/blob.bin") as s:
+                self.assertEqual(s.pread(99, 321), self.data[99:420])
+                self.assertEqual(s.cloud, "azure")
+                self.assertEqual(s.auth, "shared-key")
+        # It must use Azure's own range header, not the HTTP one.
+        ranges = [h for h in store.seen if "x-ms-range" in h]
+        self.assertTrue(ranges, "no request carried x-ms-range")
+        self.assertFalse(any("range" in h and "x-ms-range" not in h
+                             for h in store.seen))
+
+    def test_a_public_bucket_needs_nothing_configured(self):
+        """The case a first-time reader is most likely to try. No credentials
+        in the environment must mean an unsigned request, not an error."""
+        from lmsluice.source import open_source
+
+        with _fake_store(self.dir, "s3", require_auth=False) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with open_source("s3://bucket/blob.bin") as s:
+                self.assertTrue(s.anonymous)
+                self.assertEqual(s.pread(10, 20), self.data[10:30])
+
+    def test_a_wrong_signature_is_refused_by_the_store(self):
+        """Proves the fake is actually checking, which is what makes every
+        other test in this class mean something."""
+        from lmsluice.cloud import CloudError
+        from lmsluice.source import open_source
+
+        os.environ.update(AWS_ACCESS_KEY_ID="AK",
+                          AWS_SECRET_ACCESS_KEY="not-the-right-secret",
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.dir, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with self.assertRaises((OSError, CloudError)):
+                open_source("s3://bucket/blob.bin").pread(0, 16)
+
+    def test_aws_credentials_come_from_the_profile_file(self):
+        from lmsluice.cloud import aws_credentials
+
+        path = os.path.join(self.dir, "creds")
+        with open(path, "w") as fh:
+            fh.write("[default]\naws_access_key_id = D\n"
+                     "aws_secret_access_key = ds\n\n"
+                     "[work]\naws_access_key_id = W\n"
+                     "aws_secret_access_key = ws\nregion = eu-west-2\n")
+        os.environ["AWS_SHARED_CREDENTIALS_FILE"] = path
+        self.assertEqual(aws_credentials()["access_key"], "D")
+        self.assertEqual(aws_credentials("work")["access_key"], "W")
+        self.assertEqual(aws_credentials("work")["region"], "eu-west-2")
+        os.environ["AWS_PROFILE"] = "work"
+        self.assertEqual(aws_credentials()["access_key"], "W")
+
+    def test_the_whole_pipeline_reads_a_model_from_a_bucket(self):
+        """The test of the abstraction rather than a claim about it: `Model`,
+        `load` and `stream` were never told what a source is, so a bucket URL
+        must work with no code path of its own."""
+        from lmsluice.model import Model
+        from lmsluice.zstdcodec import encoder
+
+        plain = os.path.join(self.dir, "m.safetensors")
+        hdr, off, body = {}, 0, bytearray()
+        rnd = random.Random(12)
+        for i in range(6):
+            nb = 8192
+            body += bytes(b for _ in range(nb // 2)
+                          for b in (rnd.getrandbits(8), 0x3E))
+            hdr[f"t{i}"] = {"dtype": "BF16", "shape": [nb // 2],
+                            "data_offsets": [off, off + nb]}
+            off += nb
+        blob = json.dumps(hdr, separators=(",", ":")).encode()
+        blob += b" " * ((8 - len(blob) % 8) % 8)
+        with open(plain, "wb") as fh:
+            fh.write(struct.pack("<Q", len(blob)) + blob + bytes(body))
+        with open(plain, "rb") as fh:
+            truth = fh.read()
+        encoder().encode(plain, os.path.join(self.dir, "m.lmsl"),
+                         chunk_size=8192)
+
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=self.KEY,
+                          AWS_REGION="us-east-1")
+        with _fake_store(self.dir, "s3", key=self.KEY) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with Model("s3://bucket/m.lmsl") as m:
+                self.assertEqual(m.route, "coded")
+                self.assertEqual(bytes(m.load()), truth)
+                for name, mv in m.stream():
+                    t = m.tensors[name]
+                    self.assertEqual(bytes(mv), truth[t.start:t.end], name)
+
+
+class TestCredentialsNeverEscape(unittest.TestCase):
+    """The rule `crypt.py` set, applied to a second kind of secret."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_no_flag_takes_a_credential(self):
+        """argv is readable by every process on the machine out of `/proc`, and
+        it is in shell history everywhere."""
+        from lmsluice import cli
+
+        parser = cli.build_parser()
+        text = "\n".join(
+            [parser.format_help()]
+            + [sub.format_help()
+               for action in parser._subparsers._group_actions
+               for sub in action.choices.values()])
+        for flag in ("--secret", "--secret-key", "--password", "--access-key",
+                     "--account-key", "--sas", "--token"):
+            self.assertNotIn(flag, text, f"{flag} would put a secret in argv")
+
+    def test_a_signature_is_redacted_from_an_error(self):
+        from lmsluice.cloud import redact
+
+        text = ("GET failed: Authorization: AWS4-HMAC-SHA256 Credential=AK/x, "
+                "SignedHeaders=host, Signature=deadbeefcafe\n"
+                "x-amz-security-token: SESSIONTOKEN\nHost: example")
+        out = redact(text)
+        self.assertNotIn("deadbeefcafe", out)
+        self.assertNotIn("SESSIONTOKEN", out)
+        self.assertIn("Host: example", out, "redaction must not eat the rest")
+
+    def test_a_sas_token_in_a_url_is_redacted(self):
+        """A SAS *is* a signature, carried in the query string -- so a URL can
+        itself be a credential, and a URL is exactly what error messages print."""
+        from lmsluice.cloud import redact
+
+        url = ("https://a.blob.core.windows.net/c/b?sv=2021-08-06&"
+               "sig=abc%2Fdef%2Bghi%3D&se=2026-01-01")
+        out = redact(f"could not read {url}")
+        self.assertNotIn("abc%2Fdef", out)
+        self.assertIn("sv=2021-08-06", out, "only the signature is secret")
+
+    def test_a_live_credential_is_stripped_even_when_the_name_is_unknown(self):
+        from lmsluice.cloud import redact_env
+
+        secret = "aVerySecretKeyValue1234567890"
+        os.environ["AWS_SECRET_ACCESS_KEY"] = secret
+        try:
+            self.assertNotIn(secret, redact_env(f"boom: {secret} in a message"))
+        finally:
+            os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+
+    def test_opening_a_bad_bucket_url_does_not_leak_the_environment(self):
+        from lmsluice.cloud import open_cloud
+
+        secret = "SECRETSECRETSECRET123456"
+        os.environ.update(AWS_ACCESS_KEY_ID="AK", AWS_SECRET_ACCESS_KEY=secret,
+                          LMSLUICE_S3_ENDPOINT="http://127.0.0.1:1")
+        try:
+            with self.assertRaises(Exception) as caught:
+                open_cloud("s3://bucket/nope")
+            self.assertNotIn(secret, str(caught.exception))
+        finally:
+            for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                      "LMSLUICE_S3_ENDPOINT"):
+                os.environ.pop(k, None)
+
+    def test_no_cloud_module_imports_an_sdk_at_module_scope(self):
+        """The `no install required` row, held the way the torch and lmz rows
+        are held: by walking the source, because one stray import retires a
+        published claim silently."""
+        d = os.path.join(self.ROOT, "lmsluice")
+        offenders = []
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(d, name)) as fh:
+                src = fh.read()
+            for line in src.splitlines():
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                for sdk in ("boto3", "botocore", "google.cloud", "google.auth",
+                            "azure.storage", "azure.identity", "requests"):
+                    if s.startswith((f"import {sdk}", f"from {sdk}")):
+                        offenders.append(f"{name}: {s}")
+        self.assertEqual(offenders, [],
+                         "object storage must need nothing installed")
 
 
 if __name__ == "__main__":

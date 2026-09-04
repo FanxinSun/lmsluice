@@ -196,6 +196,9 @@ def cmd_info(args) -> int:
     with open_model(args.target, profile=_profile(args)) as m:
         print(f"{args.target}\n  route {m.route} · {len(m.tensors)} tensors · "
               f"{_bytes(m.plain_bytes)} plain · r={m.ratio:.3f}")
+        store = _store_of(m)
+        if store:
+            print(f"  from {store}")
         enc = getattr(getattr(getattr(m, "_arc", None), "source", None),
                       "encryption", None)
         if enc:
@@ -214,6 +217,17 @@ def cmd_info(args) -> int:
     return 0
 
 
+def _store_of(m):
+    """`s3 · stdlib · signed`, or nothing when the source is not a bucket."""
+    src = getattr(getattr(m, "_arc", None), "source", None) or getattr(m, "_src", None)
+    src = getattr(src, "_inner", src)     # a store that refused ranges
+    if getattr(src, "cloud", None) is None:
+        return ""
+    from .cloud import describe
+
+    return describe(src)
+
+
 def cmd_get(args) -> int:
     """Move a model to a local plain file, over whatever route it came by."""
     from .model import open_model
@@ -224,10 +238,14 @@ def cmd_get(args) -> int:
             print(f"{args.dst} exists (use --force)", file=sys.stderr)
             return 1
         n = m.to_file(args.dst, overwrite=args.force)
+        # Read before the model closes: closing releases the source, and the
+        # store's name goes with it.
+        store = _store_of(m)
     elapsed = time.perf_counter() - started
     print(f"{_bytes(n)} in {elapsed:.2f}s = {n / elapsed / 1e9:.2f} GB/s "
           f"plain, over the {m.route} route "
-          f"({_bytes(m.coded_bytes)} actually moved)")
+          f"({_bytes(m.coded_bytes)} actually moved"
+          + (f", from {store}" if store else "") + ")")
     return 0
 
 
@@ -274,10 +292,18 @@ def cmd_bench(args) -> int:
                 plan = m.device_plan() if args.to_device else m.plan
                 results[m.route] = (best, m.plain_bytes, plan, times)
                 enc = m.encrypted
+                # Bytes beside seconds, always. On a metered link or a billed
+                # bucket the first number is the one that is actually paid for,
+                # and a rate alone hides it -- the coded route is faster *and*
+                # moves a third less, and only one of those shows up on a bill.
+                moved = (m.coded_bytes if m.route == "coded" else m.plain_bytes)
+                store = _store_of(m)
                 print(f"{os.path.basename(path):<28} {m.route:<6} "
                       f"{m.plain_bytes / best / 1e9:5.2f} GB/s  "
+                      f"{_bytes(moved):>9} moved  "
                       f"best of {args.reps}  "
                       f"({', '.join(f'{x:.2f}s' for x in times)})"
+                      + (f"  ·  {store}" if store else "")
                       + (f"  ·  {enc['algorithm']} via {enc['backend']}, "
                          f"{m._fetch_threads} fetch threads" if enc else ""))
         if len(results) == 2:
@@ -449,6 +475,18 @@ def cmd_doctor(args) -> int:
         print(f"encryption unavailable: {why}")
     else:
         print(f"encryption AES-256-GCM via {name} ({why})")
+    from .cloud import aws_credentials, azure_credentials, gcs_credentials
+
+    modes = []
+    for label, found in (("s3", aws_credentials()), ("gcs", gcs_credentials()),
+                         ("azure", azure_credentials())):
+        if label == "s3":
+            how = ("credentials found" if found.get("access_key")
+                   else "anonymous only")
+        else:
+            how = found.get("mode", "anonymous only")
+        modes.append(f"{label} {how}")
+    print(f"buckets {', '.join(modes)}  (stdlib signing, nothing installed)")
     print(f"cache {cache_dir()}")
     if p is None:
         print("\nno profile for this machine. run:  lmsluice probe <a model file>")

@@ -323,8 +323,8 @@ Rows are capabilities; a blank means the tool does not have it.
 |---|---|---|---|---|---|---|---|---|
 | local file | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | HTTP range GET | ✅ | | ✅ | | | | ✅ | |
-| S3 / GCS / Azure | | | ✅ | ✅ | | | HF only | |
-| authentication | | | ✅ | ✅ | | | ✅ | |
+| S3 / GCS / Azure | ✅ (stdlib signing, no SDK) | | ✅ | ✅ | | | HF only | |
+| authentication | ✅ (SigV4, Shared Key, SAS, bearer) | | ✅ | ✅ | | | ✅ | |
 | **lossless compression** | ✅ | | | | | ✅ | dedup only | |
 | **no install required** | ✅ (stdlib zstd) | | | | | | | |
 | decode on GPU | ✅ (lmz CUDA) | | | | n/a | | | |
@@ -344,6 +344,25 @@ Rows are capabilities; a blank means the tool does not have it.
 The three rows in bold that only lmsluice has are the product. The two rows
 that used to read ❌ — no tensors, not installable — were why nobody could use
 it; both are closed, and the vLLM row with them.
+
+**Object storage closed the same way encryption did, and for the same
+reason.** tensorizer reaches S3 through boto3; Run:ai Model Streamer does too.
+All three clouds authorise an HTTPS range GET with HMAC-SHA256 over a canonical
+form of the request, and `hmac` and `hashlib` are in the standard library — so
+`lmsluice/sign.py` is the whole of it, checked against AWS's own published
+signatures and Microsoft's documented canonical form. `s3://`, `gs://` and
+`az://` read through the unchanged pipeline; `get`, `info`, `load`, `stream`,
+`plan` and `bench` work on a bucket URL with no code path of their own, which
+is the test of `source.py`'s abstraction rather than a claim about it.
+
+Two things fell out that are worth stating. **GCS cost almost nothing**: its
+XML API accepts SigV4, so an HMAC key pair is the S3 path with the host
+changed. And **the SDKs did not become unnecessary, they became optional and
+narrower**: `boto3`, `google-auth` and `azure-identity` are extras used only
+for credential *sources* the standard library cannot reach — instance-metadata
+and IAM roles, service-account JWTs needing RS256, managed identity — while the
+request is signed and sent by this package either way. Each source names its
+mode, `stdlib` or `sdk`, the way the crypto backend does.
 
 **The encryption row closed without costing the row above it.** tensorizer
 encrypts with libsodium, which is a dependency; lmsluice reaches OpenSSL's

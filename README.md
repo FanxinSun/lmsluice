@@ -123,6 +123,56 @@ the plain file, and it will tell you so rather than making every later load
 slower. Nothing is cached unless asked, nothing is deleted, and an entry bound to
 a file that has changed misses rather than serving stale weights.
 
+## Buckets
+
+    lmsluice get s3://my-bucket/model.lmz  ./model.safetensors
+    lmsluice get gs://my-bucket/model.lmz  ./model.safetensors
+    lmsluice get az://account/container/model.lmz ./model.safetensors
+
+S3, Google Cloud Storage and Azure Blob, **with no SDK**. All three authorise an
+HTTPS range GET with HMAC-SHA256 over a canonical form of the request, and
+`hmac` and `hashlib` are in the standard library, so the whole of it is
+`lmsluice/sign.py` — AWS Signature V4, Azure Shared Key, SAS tokens and bearer
+tokens. `boto3` pulls botocore, s3transfer, jmespath, python-dateutil and
+urllib3; on a phone, a CI container with no wheel cache or an air-gapped box
+that is frequently the whole obstacle.
+
+**Signing is checked against each vendor's own published example**, not against
+a fake I also wrote. A signature is byte-exact or worthless, and a wrong
+canonical form produces a well-formed header that is always rejected with no
+clue which of a dozen rules was misread — so the tests pin AWS's worked
+`GET Object` signature to the hex digit and Microsoft's documented
+string-to-sign byte for byte. Round trips then go through a local fake that
+re-derives every signature it receives.
+
+**Every command works on a bucket URL and none of them was changed.** `get`,
+`info`, `load`, `stream`, `plan` and `bench` never asked what a source is —
+they ask how fast it delivers — so an object store is a third implementation of
+`pread` beside a local file and a web server. That is the test of the
+abstraction rather than a claim about it. S3-compatible stores (MinIO,
+Cloudflare R2, Backblaze B2, Ceph RGW, Wasabi) need no code of their own: set
+`LMSLUICE_S3_ENDPOINT`.
+
+**Credentials come from where each cloud already puts them** — environment,
+`~/.aws/credentials` with profiles, a connection string, a SAS, `gcloud`'s
+application-default refresh token — so a configured machine needs nothing new,
+and **a public bucket needs nothing at all**. No flag anywhere takes a secret,
+because argv is readable by every process on the machine out of `/proc`, and
+every credential-bearing header and every signature in a URL is redacted from
+every error. A SAS token *is* a signature carried in the query string, which
+makes a URL itself a credential and error messages the place they leak from.
+
+**The SDKs are extras, and narrower than they look.** `lmsluice[s3]`,
+`[gcs]`, `[azure]` are for credential *sources* the standard library cannot
+reach — instance-metadata and IAM roles, service-account JWTs needing RS256,
+managed identity. The request is signed and sent by this package either way,
+and each source reports its mode as `stdlib` or `sdk`.
+
+Signing costs 12.7 µs per request for SigV4 and 5.9 µs for Shared Key
+(9800X3D, Python 3.14). At the 4 MiB default chunk that is a ceiling of ~330
+GB/s, which is to say free against any link a bucket is reached over — and the
+number says where it would not be: very small chunks over a very fast one.
+
 ## Encryption at rest
 
 A checkpoint on a shared filesystem, in a bucket, or on a laptop that leaves the

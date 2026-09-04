@@ -1418,6 +1418,71 @@ what actually identified the binding resource. A rate measured on one
 configuration cannot say *what* limits it; a comparison across configurations
 that differ in one thing can.
 
+## Object storage, verified offline — 2026-09-04
+
+**Machine.** 9800X3D, WSL2, Python 3.14, no `boto3`, no `azure-storage-blob`
+installed. Suite run with every non-loopback `connect()` refused: **169 tests,
+0 failures, 9 skipped.**
+
+### What is verified, and what is not
+
+Stated separately because they are different claims.
+
+**Verified against the specification.** AWS Signature V4 reproduces all three
+of AWS's published worked signatures to the hex digit — `GET Object` with a
+range, `?lifecycle` (which signs as `lifecycle=`, the empty-value case), and a
+two-parameter query that must be sorted. Azure's canonical string-to-sign
+matches Microsoft's documented example byte for byte, including the twelve
+positional lines, `Content-Length: 0` signing as empty, and repeated query
+parameters joined sorted with commas.
+
+**Verified against a local fake that checks the work.** A store that
+re-derives every signature from the request it actually received, answers
+`HEAD`, serves `Range` and `x-ms-range`, and refuses an unsigned request. S3,
+GCS-over-HMAC and Azure Shared Key all read ranges through it; a deliberately
+wrong secret is refused, which is what makes the other results mean anything.
+A full `Model` load and `stream()` off `s3://` come back byte-identical, and
+`lmsluice info`, `get` and `bench` run on a bucket URL unmodified.
+
+**Not verified: any real cloud.** No request has been made to AWS, Google or
+Microsoft. That needs the user's credentials and the user's bucket and is
+theirs to authorise. Until then the correct reading of this section is *the
+protocol is right and the plumbing is right*, not *it works against S3*.
+
+### The one number worth measuring locally
+
+Signing cost per request, because a load signs one per chunk and the fetch pool
+issues them concurrently:
+
+| | per request | ceiling at 1 MiB chunks | at 4 MiB |
+|---|---|---|---|
+| AWS SigV4 | 12.7 µs | 83 GB/s | 331 GB/s |
+| Azure Shared Key | 5.9 µs | 178 GB/s | 712 GB/s |
+
+Free against any link an object store is reached over, and the point of the
+table is the *shape*: the cost is per request, not per byte, so it is the chunk
+size that decides whether it matters. It would matter at 64 KiB chunks over a
+fast local S3-compatible — which is an argument for the chunk size the codec
+already picks, not for a faster signer.
+
+Loopback throughput against the fake is deliberately not recorded. It measures
+a Python `http.server` on the same box, which is neither a bucket nor this
+machine's link, and a number that means nothing is worse than no number.
+
+### Two bugs, both mine, both found by running it
+
+1. **`redact()` did not terminate.** It replaced the value after `?sig=` and
+   then searched from the start again, found the same marker, and replaced
+   forever. It hung the suite. Both loops now carry a cursor that only moves
+   forward. The general form: an in-place rewrite that re-searches from zero
+   loops whenever the *marker* survives the rewrite.
+2. **An unreachable bucket opened successfully.** `HttpSource._head` tolerates
+   a refused `HEAD` because many servers refuse it — but it also swallowed the
+   one-byte `GET`, so a wrong endpoint or a rejected credential produced a
+   source of size zero that failed much later with a message about the archive.
+   The reason is now recorded and raised at open, credentials redacted, naming
+   how the request was authenticated and whether it was anonymous.
+
 ## Methodological notes this file earned the hard way — from 2026-08-30
 
 Recorded here rather than in `CLAUDE.md`, which is not mine to edit.
