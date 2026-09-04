@@ -66,8 +66,42 @@ DEFAULT_CHUNK = 4 << 20
 DEFAULT_LEVEL = 1
 
 
-def _zstd():
-    """The stdlib module, or a clear error naming what is missing."""
+# The first four bytes of every zstd frame. Deflate cannot collide with it:
+# a zlib header is two bytes whose big-endian value must be divisible by 31,
+# and 0x28B5 leaves a remainder of 5. So the compressor a blob was written with
+# is readable from the blob, which is what lets an archive written on 3.14 be
+# read on 3.11 without the format carrying a flag it did not always carry.
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+class _Deflate:
+    """`zlib` wearing the zstd module's two methods.
+
+    The fallback, and not a hypothetical one: `compression.zstd` arrived in
+    Python 3.14, and this package supports 3.10. Without this, `pip install
+    lmsluice` on the Python most people are running produced a package whose
+    own codec could not run -- which CI caught on the first push and no local
+    test could, because the development box is on 3.14.
+
+    Deflate compresses BF16 weights worse than zstd. That is a ratio, and the
+    gate prices ratios; it is not a failure, and `lmsluice[zstd]` closes it for
+    anyone who would rather install one small wheel. lmz makes the same bargain
+    in `lmz/entropy.py`.
+    """
+
+    name = "deflate"
+
+    @staticmethod
+    def compress(data, level=1):
+        return zlib.compress(bytes(data), min(max(int(level), 1), 9))
+
+    @staticmethod
+    def decompress(data):
+        return zlib.decompress(bytes(data))
+
+
+def _zstd(*, required: bool = True):
+    """The zstd module if this interpreter has one, else `None` or an error."""
     try:
         from compression import zstd
 
@@ -79,9 +113,35 @@ def _zstd():
 
         return zstd
     except ImportError:
+        if not required:
+            return None
         raise ImportError(
-            "no zstd: this needs Python 3.14's `compression.zstd`, which is "
-            "where the no-dependency promise comes from") from None
+            "no zstd on this interpreter: `compression.zstd` is Python 3.14+ "
+            "and the `zstandard` package is not installed. Install "
+            "`lmsluice[zstd]` to read this archive") from None
+
+
+def _compressor():
+    """What to write with: zstd where it exists, deflate everywhere else."""
+    return _zstd(required=False) or _Deflate
+
+
+def _decompress(blob):
+    """Decompress by what the bytes say they are, not by what this box has.
+
+    Sniffing rather than trusting a header field, because archives written
+    before the field existed must still open -- and because the bytes are the
+    fact while a field is a claim about them.
+    """
+    data = bytes(blob)
+    if data[:4] == ZSTD_MAGIC:
+        return _zstd().decompress(data)
+    return zlib.decompress(data)
+
+
+def backend_name() -> str:
+    """`zstd` or `deflate`: what this interpreter would write with."""
+    return "deflate" if _compressor() is _Deflate else "zstd"
 
 
 @dataclass(frozen=True)
@@ -109,7 +169,7 @@ class ZstdEncoder:
         if unknown:
             raise ValueError(f"{unknown} is not declared by this codec; "
                              f"encode_options() lists {sorted(declared)}")
-        zstd = _zstd()
+        zstd = _compressor()
         level = opts.get("level", DEFAULT_LEVEL)
         chunk = opts.get("chunk_size", DEFAULT_CHUNK)
         name = os.path.basename(src)
@@ -144,7 +204,7 @@ class ZstdEncoder:
                     probe.seek(mid[0])
                     blob = probe.read(mid[1])
                 t = time.perf_counter()
-                got = zstd.decompress(blob)
+                got = _decompress(blob)
                 dt = time.perf_counter() - t
                 if dt > 0:
                     decode_rate = len(got) / dt
@@ -152,6 +212,10 @@ class ZstdEncoder:
             index = {
                 "version": VERSION, "member": name, "total": total,
                 "chunk_size": chunk, "level": level, "chunks": chunks,
+                # What wrote it, so `info` can say so and a reader on another
+                # interpreter knows before it starts. The bytes are still the
+                # authority -- `_decompress` sniffs and does not consult this.
+                "compressor": backend_name(),
                 "tensors": _safetensors_tensors(src),
                 "measured": {
                     "encode_rate": total / encode_seconds if encode_seconds else None,
@@ -215,7 +279,7 @@ class ZstdCodec:
         if tail != TAIL:
             raise ValueError(f"{self._path}: truncated or corrupt (bad footer)")
         self._index = json.loads(
-            _zstd().decompress(source.pread(index_off, index_len)))
+            _decompress(source.pread(index_off, index_len)))
         self.plain_bytes = self._index["total"]
         self._units = [Unit(off, clen, dst, rlen, crc)
                        for off, clen, dst, rlen, crc in self._index["chunks"]]
@@ -279,7 +343,7 @@ class ZstdCodec:
     # -- decoding ---------------------------------------------------------
     def decode_chunk(self, unit: Unit, payload, out, off: int) -> int:
         """Pure: bytes in, bytes out. No I/O, no threads."""
-        raw = _zstd().decompress(bytes(payload))
+        raw = _decompress(payload)
         if len(raw) != unit.rlen:
             raise ValueError(f"chunk decoded to {len(raw)}, expected {unit.rlen}")
         if unit.opaque is not None and \

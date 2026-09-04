@@ -818,6 +818,13 @@ class TestColdRateHonesty(unittest.TestCase):
             def uncache(self, offset=0, length=0):
                 return False, "posix_fadvise refused: [Errno 22] Invalid argument"
 
+            def direct_reader(self):
+                # Refusing this too is the point. Windows reaches a cold rate
+                # through an unbuffered handle rather than by dropping a cache,
+                # so a test that only blocks `uncache` asserts nothing there --
+                # and it failed on Windows for exactly that reason, correctly.
+                return None
+
         with Refuses(self.path) as src:
             st = probe.read_rate(src, sample=1 << 20, depths=(1,))
         self.assertIsNone(st.cold)
@@ -3107,6 +3114,111 @@ class TestEncryptionStaysOutOfTheCodecs(unittest.TestCase):
 
 
 # -- object storage --------------------------------------------------------
+
+class TestCodecWithoutZstd(unittest.TestCase):
+    """The codec must work on every interpreter the package claims.
+
+    `compression.zstd` arrived in Python 3.14 and this package supports 3.10,
+    so on 3.10-3.13 with no `zstandard` installed the default codec had nothing
+    to compress with -- and the index is itself compressed, so an archive could
+    not even be opened. CI found it on the first push; no local test could,
+    because the development box is on 3.14.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _run(self, body):
+        """In a subprocess with zstd hidden, which is what 3.11 looks like."""
+        import subprocess
+
+        prog = (
+            "import builtins, sys\n"
+            f"sys.path.insert(0, {self.ROOT!r})\n"
+            "real = builtins.__import__\n"
+            "def blocked(name, *a, **k):\n"
+            "    if name in ('compression', 'compression.zstd', 'zstandard'):\n"
+            "        raise ImportError(name + ' hidden')\n"
+            "    return real(name, *a, **k)\n"
+            "builtins.__import__ = blocked\n" + body)
+        return subprocess.run([sys.executable, "-c", prog], capture_output=True,
+                              text=True, timeout=180)
+
+    FIXTURE = (
+        "import hashlib, json, os, random, struct, tempfile\n"
+        "d = tempfile.mkdtemp(); rnd = random.Random(7)\n"
+        "hdr, off, body = {}, 0, bytearray()\n"
+        "for i in range(6):\n"
+        "    nb = 32768\n"
+        "    body += bytes(b for _ in range(nb // 2)"
+        " for b in (rnd.getrandbits(8), 0x3E))\n"
+        "    hdr['blk.%d' % i] = {'dtype': 'BF16', 'shape': [nb // 2],"
+        " 'data_offsets': [off, off + nb]}\n"
+        "    off += nb\n"
+        "blob = json.dumps(hdr, separators=(',', ':')).encode()\n"
+        "blob += b' ' * ((8 - len(blob) % 8) % 8)\n"
+        "src = os.path.join(d, 'm.safetensors')\n"
+        "open(src, 'wb').write(struct.pack('<Q', len(blob)) + blob + bytes(body))\n"
+        "truth = open(src, 'rb').read()\n"
+        "coded = os.path.join(d, 'm.lmsl')\n")
+
+    def test_it_falls_back_to_deflate_and_round_trips(self):
+        r = self._run(
+            self.FIXTURE +
+            "from lmsluice.zstdcodec import backend_name, encoder\n"
+            "from lmsluice.model import Model\n"
+            "assert backend_name() == 'deflate', backend_name()\n"
+            "encoder().encode(src, coded)\n"
+            "with Model(coded) as m:\n"
+            "    assert bytes(m.load()) == truth, 'not byte-identical'\n"
+            "    assert 0 < m.ratio < 1, m.ratio\n"
+            "print('OK', round(m.ratio, 3))\n")
+        self.assertIn("OK", r.stdout, r.stdout + r.stderr[-800:])
+
+    def test_an_archive_written_with_zstd_still_says_what_it_needs(self):
+        """A reader without zstd meeting a zstd archive must say so plainly
+        rather than failing somewhere inside the container parser."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        from lmsluice.zstdcodec import backend_name, encoder
+
+        if backend_name() != "zstd":
+            self.skipTest("this interpreter has no zstd to write with")
+        plain = os.path.join(d, "m.safetensors")
+        hdr = {"w": {"dtype": "BF16", "shape": [16], "data_offsets": [0, 32]}}
+        b = json.dumps(hdr).encode()
+        b += b" " * ((8 - len(b) % 8) % 8)
+        with open(plain, "wb") as fh:
+            fh.write(struct.pack("<Q", len(b)) + b + bytes(32))
+        coded = os.path.join(d, "m.lmsl")
+        encoder().encode(plain, coded)
+        r = self._run(
+            f"from lmsluice.model import Model\n"
+            f"try:\n"
+            f"    Model({coded!r}).load()\n"
+            f"    print('FAILED: it decoded without zstd')\n"
+            f"except ImportError as e:\n"
+            f"    print('OK' if 'zstandard' in str(e) or 'zstd' in str(e)"
+            f" else 'FAILED: ' + str(e))\n")
+        self.assertIn("OK", r.stdout, r.stdout + r.stderr[-800:])
+
+    def test_a_deflate_archive_opens_where_zstd_exists(self):
+        """Both directions, or the fallback splits the format in two."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        r = self._run(
+            self.FIXTURE.replace("tempfile.mkdtemp()", repr(d)) +
+            "from lmsluice.zstdcodec import encoder\n"
+            "encoder().encode(src, coded)\n"
+            "print('WROTE', coded)\n")
+        self.assertIn("WROTE", r.stdout, r.stdout + r.stderr[-600:])
+        from lmsluice.model import Model
+
+        coded = os.path.join(d, "m.lmsl")
+        with open(os.path.join(d, "m.safetensors"), "rb") as fh:
+            truth = fh.read()
+        with Model(coded) as m:
+            self.assertEqual(bytes(m.load()), truth)
+
 
 class TestSigning(unittest.TestCase):
     """Known-answer tests against each vendor's own published example.

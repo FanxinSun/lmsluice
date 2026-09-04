@@ -223,11 +223,19 @@ class FileSource(Source):
             return True, "nothing to restore: DONTNEED is an event, not a mode"
         try:
             import fcntl
-
+        except ImportError:
+            # Windows. `uncache` there opens a separate unbuffered handle and
+            # closes it; it never puts a descriptor into a mode, so there is
+            # nothing to undo and success is the honest answer. Reporting
+            # failure made a platform with no such mode look like a platform
+            # where restoring it went wrong -- which is what CI said, on the
+            # first run against Windows this package ever had.
+            return True, "no per-descriptor cache mode on this platform"
+        try:
             F_NOCACHE = 48
             fcntl.fcntl(self._fd, F_NOCACHE, 0)
             return True, "fcntl(F_NOCACHE, 0)"
-        except (ImportError, OSError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             return False, f"could not clear F_NOCACHE: {exc}"
 
     def direct_reader(self):

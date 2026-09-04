@@ -114,7 +114,12 @@ cache on local disk, byte-identical, with nothing published and nothing
 installed.
 
 **Nothing installed** is literal: `lmsluice/zstdcodec.py` uses the standard
-library's zstd, so a machine with no lmz still gets a cache. lmz is preferred
+library's zstd, so a machine with no lmz still gets a cache. On Python 3.10-3.13,
+where `compression.zstd` does not exist yet, it falls back to deflate — which
+works, round-trips byte-identically and compresses a little less well (r=0.657
+against 0.624 on the same BF16 fixture). `pip install lmsluice[zstd]` buys the
+ratio back; nothing needs it to function, and an archive written either way
+opens on either. lmz is preferred
 where present because it compresses better; it is an upgrade rather than a
 prerequisite.
 
