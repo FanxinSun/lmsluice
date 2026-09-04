@@ -1569,6 +1569,27 @@ that reaches a library this way wants a different pool depth from one that
 waits on a device**: `probe.SEALED_FETCH` is 2 where the ordinary fetch depth is
 16, and the default of 16 cost 21% of a sealed load until it was measured.
 
+### A fake agrees with whoever wrote it
+
+Added 2026-09-04, from the object-storage work.
+
+A local fake store, written to check signatures and serve ranges, passed every
+test. The first real bucket then failed on the first object it listed: Azure
+answers **416** to a one-byte probe on a zero-length blob, and the fake answered
+206 with an empty body. Both mean "this object exists and is empty". Only the
+behaviour I had in mind was handled, so an empty object read as unreachable —
+and zero-byte `_SUCCESS` markers are in every directory Spark writes, so it is
+common rather than exotic.
+
+The general form: **a fake encodes its author's model of the protocol, so it
+cannot disagree with that model, and the places real implementations differ are
+exactly the places a fake is silent.** It is the same shape as the thread sweep
+that could not identify what binds — one configuration produces one curve and
+any story fits it. A fake is worth having, and it caught real bugs here; what
+it cannot do is be surprising. Budget one small real run for that, and expect
+the surprise to be in a corner rather than in the main path, because the main
+path is what the fake was written from.
+
 ### A raw key file must never be stripped
 
 Added 2026-09-04. `bytes.strip()` removes 0x09, 0x0a, 0x0b, 0x0c, 0x0d and
