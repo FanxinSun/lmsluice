@@ -22,6 +22,7 @@ import random
 import re as RE
 import struct
 import urllib.parse
+import urllib.request
 import datetime as DT
 import zlib
 
@@ -3311,6 +3312,59 @@ class TestCloudSources(unittest.TestCase):
             with open_source("s3://bucket/blob.bin") as s:
                 self.assertTrue(s.anonymous)
                 self.assertEqual(s.pread(10, 20), self.data[10:30])
+
+    def test_an_empty_object_opens_as_empty_rather_than_unreachable(self):
+        """Found against real Azure, on the first blob a public container
+        listed. A one-byte probe on a zero-length object is a 416, which is
+        indistinguishable from a failure unless it is handled -- so an object
+        that exists and is simply empty was being reported as unreachable.
+        Spark leaves a zero-byte `_SUCCESS` marker in every output directory,
+        so this is common rather than exotic."""
+        from lmsluice.source import open_source
+
+        with open(os.path.join(self.dir, "empty.bin"), "wb"):
+            pass
+        with _fake_store(self.dir, "s3", require_auth=False) as base:
+            os.environ["LMSLUICE_S3_ENDPOINT"] = base
+            with open_source("s3://bucket/empty.bin") as s:
+                self.assertEqual(s.size, 0)
+                self.assertTrue(s.random_access)
+                self.assertEqual(s.pread(0, 0), b"")
+
+    def test_the_other_empty_object_reply_is_handled_too(self):
+        """Stores disagree about an unsatisfiable range on a zero-length
+        object: the fake above answers 206 with an empty body, real Azure
+        answers 416. Both mean empty, and only one of them was handled when
+        this was first written."""
+        import urllib.error
+
+        from lmsluice.source import HttpSource
+
+        class Probe(HttpSource):
+            def __init__(self):
+                self.name = self.url = "https://example.invalid/empty"
+                self.timeout = 5
+                self.headers = {}
+                self._signer = None
+                self.range_header = "Range"
+                self._local = threading.local()
+                self.size, self.random_access = self._head()
+
+        real = urllib.request.urlopen
+
+        def boom(*a, **k):
+            raise urllib.error.HTTPError(
+                "https://example.invalid/empty", 416, "Range Not Satisfiable",
+                {}, None)
+
+        urllib.request.urlopen = boom
+        try:
+            p = Probe()
+        finally:
+            urllib.request.urlopen = real
+        self.assertEqual(p.size, 0)
+        self.assertTrue(p.random_access)
+        self.assertIsNone(p.head_error)
 
     def test_a_wrong_signature_is_refused_by_the_store(self):
         """Proves the fake is actually checking, which is what makes every

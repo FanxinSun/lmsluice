@@ -330,9 +330,19 @@ class HttpSource(Source):
                     if total[-1].isdigit():
                         size = int(total[-1])
                     return size, True
+                # A zero-length object cannot return a byte because it has
+                # none, and stores disagree about how to say so: some answer
+                # 206 with an empty body, Azure answers 416. Both mean the
+                # object exists and is empty, which is a size and not a
+                # failure -- Spark leaves a zero-byte `_SUCCESS` marker in
+                # every output directory it writes, so this is common.
+                if size == 0 or (r.status == 206 and not body):
+                    return 0, True
                 # 200 with the whole body: the server ignored the range.
                 return (size or int(r.headers.get("Content-Length") or 0)), False
         except Exception as exc:          # noqa: BLE001
+            if getattr(exc, "code", None) == 416:
+                return 0, True            # the other half of the empty case
             self.head_error = exc
             return size, False
 

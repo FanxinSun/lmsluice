@@ -1444,10 +1444,37 @@ wrong secret is refused, which is what makes the other results mean anything.
 A full `Model` load and `stream()` off `s3://` come back byte-identical, and
 `lmsluice info`, `get` and `bench` run on a bucket URL unmodified.
 
-**Not verified: any real cloud.** No request has been made to AWS, Google or
-Microsoft. That needs the user's credentials and the user's bucket and is
-theirs to authorise. Until then the correct reading of this section is *the
-protocol is right and the plumbing is right*, not *it works against S3*.
+**Verified against the real services, anonymously.** The user authorised a
+read-only public-bucket test with a stated budget; **4.72 MB** moved in total.
+All three answered:
+
+| store | object | result |
+|---|---|---|
+| S3 | `s3://noaa-ghcn-pds/ghcnd-stations.txt`, 11.4 MB | 24 concurrent 64 KiB ranges identical to one contiguous 1.57 MB read |
+| GCS | `gs://gcp-public-data-landsat/index.csv.gz`, 767 MB | 6 concurrent ranges identical to the contiguous read |
+| Azure | `az://azureopendatastorage/censusdatacontainer/...parquet`, 7.8 MB | 6 concurrent ranges identical, over `x-ms-range` |
+
+The check is deliberately not "it returned 200". Bytes fetched as several
+concurrent ranges must equal the same bytes fetched contiguously, which is what
+the fetch pool actually does and what a wrong header name or an off-by-one
+range gets wrong silently. A read past the end raises `EOFError` on all three.
+
+**Still not verified: a signed request against a real store.** Everything above
+was anonymous. SigV4 and Shared Key are checked against the vendors' published
+signatures and against a fake that re-derives them, which is a strong claim
+about the protocol — but no real bucket has yet rejected or accepted a
+signature this package produced, and that needs credentials and a bucket the
+user owns.
+
+**One defect the real test found and the fake never could.** Azure answers
+**416** to a one-byte probe on a zero-length blob; the local fake answers 206
+with an empty body. Both mean "this object exists and is empty", and only the
+second was handled, so an empty object was reported as unreachable. Spark
+leaves a zero-byte `_SUCCESS` marker in every directory it writes, so this is
+common rather than exotic — and it was the *first* blob the public container
+listed. The general form: a fake agrees with whichever server behaviour its
+author had in mind, and the ones that differ are exactly the ones worth
+testing.
 
 ### The one number worth measuring locally
 

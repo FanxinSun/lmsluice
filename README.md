@@ -137,6 +137,12 @@ tokens. `boto3` pulls botocore, s3transfer, jmespath, python-dateutil and
 urllib3; on a phone, a CI container with no wheel cache or an air-gapped box
 that is frequently the whole obstacle.
 
+**All three have been read from for real**, anonymously, from public buckets —
+S3, GCS and Azure, with concurrent ranges checked byte-for-byte against the
+same bytes read contiguously (`MEASURED.md` has the objects and the 4.72 MB it
+cost). Signed requests against a real store are the one thing still unverified:
+they need a bucket and credentials.
+
 **Signing is checked against each vendor's own published example**, not against
 a fake I also wrote. A signature is byte-exact or worthless, and a wrong
 canonical form produces a well-formed header that is always rejected with no
