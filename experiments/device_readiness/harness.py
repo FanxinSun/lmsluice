@@ -62,6 +62,7 @@ REQUIRED_ENGINEERING = {
     "application-restart",
     "multipart-failure-detection",
     "cache-workflow",
+    "cache-fastpath",
 }
 
 
@@ -1862,8 +1863,83 @@ def _run_affordability(campaign: Campaign, bundle: dict) -> dict:
             "controls": controls, "route_prediction": route_prediction}
 
 
+def _audit_cache_find(cache, path: str) -> tuple[str | None, dict]:
+    """Prove a cache lookup does not read source content.
+
+    The sidecar is still allowed to be opened.  Any source open is wrapped so
+    actual bytes read are counted, and the explicit build hash helper is
+    forbidden to make a hash-based lookup fail loudly if it regresses.
+    """
+    from unittest import mock
+
+    source_real = os.path.realpath(os.path.abspath(path))
+    real_open = open
+    source_open_calls = []
+    source_content_bytes_read = 0
+    source_hash_calls = []
+    found = None
+    error = None
+
+    class _TrackedSource:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._handle.__exit__(*args)
+
+        def read(self, *args, **kwargs):
+            nonlocal source_content_bytes_read
+            data = self._handle.read(*args, **kwargs)
+            source_content_bytes_read += len(data)
+            return data
+
+        def readinto(self, buffer, *args, **kwargs):
+            nonlocal source_content_bytes_read
+            count = self._handle.readinto(buffer, *args, **kwargs)
+            source_content_bytes_read += max(0, count or 0)
+            return count
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def audited_open(file, *args, **kwargs):
+        try:
+            candidate = os.path.realpath(os.path.abspath(os.fspath(file)))
+        except (TypeError, ValueError):
+            candidate = None
+        handle = real_open(file, *args, **kwargs)
+        if candidate == source_real:
+            source_open_calls.append(candidate)
+            return _TrackedSource(handle)
+        return handle
+
+    def forbidden_hash(candidate):
+        source_hash_calls.append(os.fspath(candidate))
+        raise AssertionError("cache.find called the source hash helper")
+
+    try:
+        with mock.patch("builtins.open", side_effect=audited_open):
+            with mock.patch.object(cache, "_source_sha256",
+                                   side_effect=forbidden_hash):
+                found = cache.find(path)
+    except Exception as exc:                  # retain a structured failed fact
+        error = _error(exc)
+    return found, {
+        "source_size_bytes": os.path.getsize(path),
+        "source_open_calls": len(source_open_calls),
+        "source_content_bytes_read": source_content_bytes_read,
+        "source_hash_calls": len(source_hash_calls),
+        "error": error,
+        "lookup_work": "stat/file-generation metadata plus cache sidecar",
+    }
+
+
 def _run_cache_workflow(campaign: Campaign, bundle: dict) -> dict:
-    """Exercise the existing local cache identity and reuse behavior."""
+    """Exercise local cache generation identity and reuse behavior."""
     from lmsluice import cache
 
     workflow_dir = os.path.join(campaign.out, "cache-workflow")
@@ -1905,16 +1981,60 @@ def _run_cache_workflow(campaign: Campaign, bundle: dict) -> dict:
                      required=False, **warm_facts,
                      reuse="automatic existing cache entry; output bytes checked")
 
+        larger_source = os.path.join(workflow_dir, "cache-source-larger.bin")
+        with open(source, "rb") as fh:
+            larger_payload = fh.read() + (b"x" * (256 << 10))
+        with open(larger_source, "wb") as fh:
+            fh.write(larger_payload)
+        larger_entry = cache.build(larger_source, codec="zstd")
+        small_hit, small_audit = _audit_cache_find(cache, source)
+        larger_hit, larger_audit = _audit_cache_find(cache, larger_source)
+        fast_ok = all((hit == entry,
+                       audit["source_open_calls"] == 0,
+                       audit["source_content_bytes_read"] == 0,
+                       audit["source_hash_calls"] == 0,
+                       audit["error"] is None)
+                      for hit, entry, audit in (
+                          (small_hit, entry, small_audit),
+                          (larger_hit, larger_entry, larger_audit)))
+        outcomes["fastpath"] = fast_ok
+        campaign.row(
+            "cache-fastpath", "PASS" if fast_ok else "FAIL", required=True,
+            source_generation_identity=(
+                "canonical path, size, mtime_ns, ctime_ns, device and file_id"),
+            small=small_audit, larger=larger_audit,
+            small_hit=small_hit, larger_hit=larger_hit,
+            source_content_bytes_read=(
+                small_audit["source_content_bytes_read"] +
+                larger_audit["source_content_bytes_read"]),
+            assertion="cache.find reads zero source-content bytes",
+            platform_boundary=(
+                "trustworthy POSIX generation metadata; unsupported or ambiguous "
+                "platforms conservatively miss without hashing"),
+        )
+        cache.clear(larger_source)
+
         before_stat = os.stat(source)
         before_key = cache.key_for(source)
+        before_generation = cache._source_generation(source)
         before_source_sha = hash_file(source)
         _flip(source, 700)
         os.utime(source, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
         after_key = cache.key_for(source)
+        after_generation = cache._source_generation(source)
         after_source_sha = hash_file(source)
-        stale = cache.find(source)
-        changed_ok = before_source_sha != after_source_sha and before_key == after_key
-        refusal_ok = stale is None
+        stale, stale_audit = _audit_cache_find(cache, source)
+        same_stat_identity = (
+            before_key == after_key and
+            before_generation["path"] == after_generation["path"] and
+            before_generation["size"] == after_generation["size"] and
+            before_generation["mtime_ns"] == after_generation["mtime_ns"])
+        generation_changed = before_generation != after_generation
+        changed_ok = (before_source_sha != after_source_sha and
+                      same_stat_identity and generation_changed)
+        refusal_ok = (stale is None and stale_audit["error"] is None and
+                       stale_audit["source_content_bytes_read"] == 0 and
+                       stale_audit["source_hash_calls"] == 0)
         outcomes["changed_artifact"] = changed_ok
         outcomes["stale_refusal"] = refusal_ok
         campaign.row(
@@ -1922,14 +2042,21 @@ def _run_cache_workflow(campaign: Campaign, bundle: dict) -> dict:
             required=False, before_key=before_key, after_key=after_key,
             before_source_sha256=before_source_sha,
             after_source_sha256=after_source_sha,
-            same_stat_identity=True,
-            identity_changed=before_source_sha != after_source_sha)
+            before_generation=before_generation,
+            after_generation=after_generation,
+            same_stat_identity=same_stat_identity,
+            generation_changed=generation_changed,
+            identity_changed=before_source_sha != after_source_sha,
+            generation_fields=("path", "size", "mtime_ns", "ctime_ns",
+                               "device", "file_id"))
         campaign.row(
             "B1-cache-stale-refusal", "PASS" if refusal_ok else "FAIL",
             required=False, candidate_entry=entry,
             cache_find_after_change=stale,
             refusal=refusal_ok,
-            reason="sidecar source_sha256 rejects an in-place rewrite even when size and mtime are restored")
+            lookup_audit=stale_audit,
+            reason=("source-generation sidecar comparison rejects an in-place "
+                    "rewrite even when size and mtime are restored"))
 
         refreshed_entry = cache.build(source, codec="zstd", force=True)
         changed_expected = hash_file(source)
@@ -1947,6 +2074,68 @@ def _run_cache_workflow(campaign: Campaign, bundle: dict) -> dict:
         campaign.row("B1-cache-changed-refresh", "PASS" if refreshed_ok else "FAIL",
                      required=False, **refreshed_facts,
                      stale_bytes_replaced=True)
+
+        atomic_before_stat = os.stat(source)
+        atomic_before_generation = cache._source_generation(source)
+        atomic_before_sha = hash_file(source)
+        replacement = os.path.join(workflow_dir, "cache-source-replacement.safetensors")
+        with open(source, "rb") as fh:
+            replacement_payload = bytearray(fh.read())
+        replacement_payload[701] ^= 0x01
+        with open(replacement, "wb") as fh:
+            fh.write(replacement_payload)
+        os.utime(replacement, ns=(atomic_before_stat.st_atime_ns,
+                                  atomic_before_stat.st_mtime_ns))
+        os.replace(replacement, source)
+        atomic_after_generation = cache._source_generation(source)
+        atomic_after_sha = hash_file(source)
+        atomic_stale, atomic_audit = _audit_cache_find(cache, source)
+        atomic_same_stat = (
+            atomic_before_generation["path"] == atomic_after_generation["path"] and
+            atomic_before_generation["size"] == atomic_after_generation["size"] and
+            atomic_before_generation["mtime_ns"] == atomic_after_generation["mtime_ns"] and
+            cache.entry_for(source) == refreshed_entry)
+        atomic_ok = (atomic_before_sha != atomic_after_sha and
+                     atomic_same_stat and
+                     atomic_before_generation != atomic_after_generation and
+                     atomic_stale is None and atomic_audit["error"] is None and
+                     atomic_audit["source_content_bytes_read"] == 0 and
+                     atomic_audit["source_hash_calls"] == 0)
+        outcomes["atomic_replacement"] = atomic_ok
+        campaign.row(
+            "B1-cache-atomic-replacement",
+            "PASS" if atomic_ok else "FAIL", required=False,
+            before_generation=atomic_before_generation,
+            after_generation=atomic_after_generation,
+            before_source_sha256=atomic_before_sha,
+            after_source_sha256=atomic_after_sha,
+            same_stat_identity=atomic_same_stat,
+            cache_find_after_replace=atomic_stale,
+            lookup_audit=atomic_audit,
+            reason="inode/change-time generation change rejects restored-stat replacement")
+
+        atomic_expected = hash_file(source)
+        atomic_entry = cache.build(source, codec="zstd", force=False)
+        with open_model(source, cache="auto") as model:
+            atomic_refreshed = bytes(model.load())
+            atomic_refresh_facts = {
+                "route": model.route, "from_cache": model.from_cache,
+                "output_sha256": hashlib.sha256(atomic_refreshed).hexdigest(),
+                "expected_sha256": atomic_expected,
+                "cache_entry": os.path.relpath(atomic_entry, workflow_dir),
+            }
+        atomic_refresh_ok = (
+            atomic_refreshed == replacement_payload and
+            atomic_refresh_facts["from_cache"] and
+            atomic_refresh_facts["route"] == "coded" and
+            atomic_refresh_facts["output_sha256"] == atomic_expected)
+        outcomes["invalid_existing_refresh"] = atomic_refresh_ok
+        campaign.row(
+            "B1-cache-invalid-existing-refresh",
+            "PASS" if atomic_refresh_ok else "FAIL", required=False,
+            **atomic_refresh_facts,
+            build_force_false=True,
+            invalid_existing_sidecar_rebuilt=True)
 
         retry_row = next((row for row in reversed(campaign.rows)
                           if row["case"] == "retry-restart-from-zero"), None)
@@ -1995,6 +2184,10 @@ def _run_cache_workflow(campaign: Campaign, bundle: dict) -> dict:
         "initial_miss": initial_facts,
         "warm_reuse": warm_facts,
         "changed_refresh": refreshed_facts,
+        "atomic_replacement": {
+            "entry": os.path.relpath(atomic_entry, workflow_dir),
+            "facts": atomic_refresh_facts,
+        },
         "cache_root": os.path.relpath(cache_home, campaign.out),
         "persistent_resume": "NOT_IMPLEMENTED; existing retry is from zero",
         "customer_value": "UNVALIDATED",

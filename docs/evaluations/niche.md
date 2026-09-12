@@ -5,7 +5,9 @@ workflows and records technical, integration and evidence limits. The current
 correction campaign is identified by the exact `source_commit` in
 `manifest.json` and the export-substituted marker in
 [`final-evidence.json`](final-evidence.json); its complete rows and records
-are retained in the probe archive and in the required correction report. The
+are retained in the probe archive and in the current final cache fast-path
+review report:
+`/home/rog/.codex/handover/2026-09-13-lmsluice-cache-fastpath-final-review.REPORT.md`.
 reference clean tracked-export campaign
 (`/tmp/lmsluice-device-readiness.WKXRxT`) used the frozen workload and checked
 consumer output hashes against

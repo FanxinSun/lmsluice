@@ -7,9 +7,10 @@ host. The current correction campaign is identified by the exact
 `source_commit` in `manifest.json` and the export-substituted marker in
 [`final-evidence.json`](final-evidence.json). Its complete raw evidence is
 retained in the run directory and deterministic archive reported by the probe;
-the compact campaign row is `A1-summary` in `results.jsonl`. The required
-complete return is
-`/home/rog/.codex/handover/2026-09-13-lmsluice-device-response-acceptance-corrections.REPORT.md`.
+the compact campaign row is `A1-summary` in `results.jsonl`. The earlier
+correction return is historical. The final cache fast-path review supersedes
+it; the current complete return is
+`/home/rog/.codex/handover/2026-09-13-lmsluice-cache-fastpath-final-review.REPORT.md`.
 
 The measurements below are the dated initial campaign sample retained for
 context. They are superseded by the correction campaign's five-sample arm

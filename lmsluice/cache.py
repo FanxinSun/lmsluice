@@ -29,10 +29,11 @@ people:
 - **Nothing is deleted.** The compressed copy sits beside the original and costs
   disk until someone removes it. A tool that tidies a model directory on the
   user's behalf will eventually delete the wrong thing.
-- **A cache entry is bound to the file that produced it** -- path, size and
-  modification time select the candidate, and the sidecar's source digest
-  validates its contents -- so an edited checkpoint silently misses rather
-  than silently serving stale weights.
+- **A cache entry is bound to the file generation that produced it** -- the
+  canonical path, size, nanosecond timestamps and filesystem identity select
+  the candidate, so an edited checkpoint silently misses rather than silently
+  serving stale weights.  A source digest remains build/audit evidence and is
+  never read on the automatic hit path.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ import hashlib
 import json
 import os
 import shutil
+import sys
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -61,21 +64,60 @@ def models_dir() -> str:
     return os.path.join(_root(), "models")
 
 
-def key_for(path: str) -> str:
-    """Identity of the *contents*, cheaply.
+def _canonical_path(path: str) -> str:
+    return os.path.realpath(os.path.abspath(os.fspath(path)))
 
-    Path, size and mtime rather than a hash of the bytes: hashing a 70 GB
-    checkpoint to decide whether to read it faster is self-defeating, and the
-    failure mode of this key -- a file rewritten within the same second at the
-    same length -- is one a model directory does not produce.
+
+def _source_generation(path: str) -> dict | None:
+    """Return cheap source identity, or None when the platform is ambiguous.
+
+    Linux/WSL and the other POSIX targets below expose nanosecond mtime and
+    change time together with device/inode identity.  This is a conservative
+    filesystem-generation token, not a cryptographic statement about bytes.
+    """
+    if os.name != "posix" or not sys.platform.startswith(
+            ("linux", "darwin", "freebsd", "openbsd")):
+        return None
+    try:
+        st = os.stat(path)
+        values = {
+            "path": _canonical_path(path),
+            "size": int(st.st_size),
+            "mtime_ns": int(st.st_mtime_ns),
+            "ctime_ns": int(st.st_ctime_ns),
+            "device": int(st.st_dev),
+            "file_id": int(st.st_ino),
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if (values["size"] < 0 or values["mtime_ns"] < 0 or
+            values["ctime_ns"] < 0 or values["device"] < 0 or
+            values["file_id"] <= 0):
+        return None
+    return values
+
+
+def _require_source_generation(path: str) -> dict:
+    generation = _source_generation(path)
+    if generation is None:
+        raise OSError("cache requires trustworthy POSIX source generation "
+                      "metadata (path, size, mtime, ctime, device and inode)")
+    return generation
+
+
+def key_for(path: str) -> str:
+    """Candidate key for a source path, computed without reading its bytes.
+
+    The key remains deliberately small and compatible with the cache layout;
+    the sidecar carries the fuller source-generation identity used by ``find``.
     """
     st = os.stat(path)
-    seed = f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}"
+    seed = f"{_canonical_path(path)}|{st.st_size}|{st.st_mtime_ns}"
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
 def _source_sha256(path: str) -> str:
-    """Hash a source only when a candidate cache entry needs validation."""
+    """Hash a source for explicit build/audit evidence, never for ``find``."""
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         while True:
@@ -91,23 +133,28 @@ def entry_for(path: str) -> str:
 
 def find(path: str) -> str | None:
     """A cached coded form of `path`, or None. Never builds one."""
+    generation = _source_generation(path)
+    if generation is None:
+        return None
     try:
         got = entry_for(path)
     except OSError:
         return None
     if not os.path.exists(got):
         return None
-    # Path, size and nanosecond mtime are a cheap first key, but a caller can
-    # restore an mtime after an in-place rewrite.  A cache hit must never then
-    # serve bytes made from the old contents.  Older sidecars have no digest,
-    # so they are conservatively treated as misses and rebuilt on request.
+    # The sidecar is intentionally the only non-stat input on this path.
+    # Older sidecars have no generation, so they are conservatively misses.
     try:
         with open(got + ".json", encoding="utf-8") as fh:
             meta = json.load(fh)
-        recorded = meta.get("source_sha256")
-        if not recorded or recorded != _source_sha256(path):
+        if not isinstance(meta, dict):
             return None
-    except (OSError, ValueError):
+        if (meta.get("source") != generation["path"] or
+                meta.get("source_generation") != generation or
+                meta.get("plain_bytes") != generation["size"] or
+                meta.get("coded_bytes") != os.path.getsize(got)):
+            return None
+    except (OSError, TypeError, ValueError):
         return None
     return got
 
@@ -220,16 +267,28 @@ def build(path: str, *, force: bool = False, level: int | None = None,
     better, and falls back to the standard library so that a machine with
     nothing installed still gets a cache.
     """
+    before = _require_source_generation(path)
     dst = entry_for(path)
-    if os.path.exists(dst) and not force:
-        return dst
+    if not force:
+        existing = find(path)
+        if existing is not None:
+            return existing
     os.makedirs(models_dir(), exist_ok=True)
     free = shutil.disk_usage(models_dir()).free
-    need = os.path.getsize(path)
+    need = before["size"]
     if free - need < KEEP_FREE:
         raise OSError(f"not enough room: caching needs about {need / 1e9:.1f} GB "
                       f"and {free / 1e9:.1f} GB is free; the cache keeps "
                       f"{KEEP_FREE / 1e9:.0f} GB clear")
+
+    # The old entry may still be useful to an already-open consumer, but its
+    # sidecar must not survive a rebuild.  Until the new pair is complete,
+    # find() therefore returns a miss.
+    sidecar = f"{dst}.json"
+    try:
+        os.unlink(sidecar)
+    except FileNotFoundError:
+        pass
 
     chosen, enc = _encoder(codec)
     opts = {}
@@ -237,14 +296,21 @@ def build(path: str, *, force: bool = False, level: int | None = None,
         opts["level"] = level
     if chunk_size is not None:
         opts["chunk_size"] = chunk_size
-    tmp = f"{dst}.{os.getpid()}"
+    tmp_fd, tmp = tempfile.mkstemp(prefix=os.path.basename(dst) + ".",
+                                   dir=models_dir())
+    os.close(tmp_fd)
     try:
         enc.encode(path, tmp, **opts)
+        after = _require_source_generation(path)
+        if after != before:
+            raise RuntimeError(
+                "source generation changed during cache encoding; temporary "
+                "cache entry was discarded")
         os.replace(tmp, dst)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-    _note(dst, path, chosen)
+    _note(dst, path, chosen, generation=after)
     return dst
 
 
@@ -280,14 +346,38 @@ class _WithDefaults:
         return self._inner.encode(src, dst, **{**self._defaults, **opts})
 
 
-def _note(dst: str, src: str, codec: str) -> None:
-    """A sidecar saying what this entry is, so a cache directory is readable."""
-    meta = {"source": os.path.abspath(src), "codec": codec,
-            "plain_bytes": os.path.getsize(src),
+def _note(dst: str, src: str, codec: str, *, generation: dict) -> None:
+    """Publish auditable metadata atomically after a verified entry exists."""
+    current = _require_source_generation(src)
+    if current != generation:
+        raise RuntimeError(
+            "source generation changed before cache sidecar publication; "
+            "cache entry was left unverified")
+    source_sha = _source_sha256(src)
+    current = _require_source_generation(src)
+    if current != generation:
+        raise RuntimeError(
+            "source generation changed while recording cache audit metadata; "
+            "cache entry was left unverified")
+    meta = {"source": generation["path"], "codec": codec,
+            "plain_bytes": generation["size"],
             "coded_bytes": os.path.getsize(dst),
-            "source_sha256": _source_sha256(src), "built_at": time.time()}
-    with open(f"{dst}.json", "w") as fh:
-        json.dump(meta, fh, indent=1)
+            "source_generation": generation,
+            "source_sha256": source_sha, "built_at": time.time()}
+    directory = os.path.dirname(dst)
+    sidecar = f"{dst}.json"
+    fd, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(sidecar) + ".", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, indent=1)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, sidecar)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def entries() -> list[dict]:
@@ -313,8 +403,10 @@ def entries() -> list[dict]:
 def clear(source: str | None = None) -> int:
     """Remove cache entries. Returns how many. Touches nothing else."""
     n = 0
+    requested = _canonical_path(source) if source else None
     for meta in entries():
-        if source and os.path.abspath(source) != meta.get("source"):
+        if source and meta.get("source") not in (
+                os.path.abspath(source), requested):
             continue
         for p in (meta["entry"], meta["entry"] + ".json"):
             if os.path.exists(p):

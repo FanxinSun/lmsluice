@@ -176,7 +176,7 @@
     "resource_scope": "Bounded current-process RSS/PSS/HWM sampling; child pages, allocator-specific, device and energy counters remain explicit UNMEASURED when unavailable.",
     "time_events": "All readiness events use one time.monotonic_ns origin. Missing consumer events are null, not zero.",
     "parallelism": "The campaign compares one and two fetch workers under one shared aggregate cap; extra threads must not be read as extra link capacity.",
-    "failure": "Induced failures remain in results.jsonl and errors/; detection rows carry the engineering verdict.",
+    "failure": "Induced failures remain in results.jsonl. Three faults (source reset, truncated range and multipart signature/body failure) also have standalone errors/ traces; five other faults use structured JSONL error/detection rows without standalone traces.",
     "strategic_evidence": "Local fixtures establish mechanism behavior. Real device, host, customer, cost and authenticated-store evidence is reported unavailable unless supplied."
   }
 }

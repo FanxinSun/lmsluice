@@ -7,8 +7,11 @@ resolves that commit in a Git archive. It completes with engineering status
 negative, induced-failure, `NOT_RUN`, unavailable and inconclusive result, and
 archive hashes are in the required correction report and retained run output.
 Induced failures are expected inputs to the fault campaign, not hidden
-regressions. Each has a separate detection row, and the complete traceback
-remains under the run's `errors/` directory.
+regressions. Each has a separate detection row. Three induced faults have
+standalone traces under the run's `errors/` directory (`fault-source-reset`,
+`fault-truncated-range` and `multipart-signature-body-failure`); the other five
+are retained as structured JSONL error and detection rows without standalone
+trace files.
 
 During implementation and focused tests, these in-scope issues were found and
 fixed before the final run:
@@ -27,6 +30,10 @@ fixed before the final run:
   the local HTTP handler resolves paths consistently, and fault classification
   accepts the stdlib decompressor's actual error type. These fixes keep failure
   evidence meaningful and do not change the default loader path.
+* Automatic cache hits now compare a canonical-path/size/mtime/ctime/device/
+  inode generation sidecar without reading the source. Builds validate that
+  generation before and after encoding and publish the entry and sidecar as a
+  verified pair; a source digest remains explicit build/audit evidence.
 * The portable sampler treats Python's `resource` module as optional, allowing
   native Windows to retain `UNMEASURED` resource fields instead of failing at
   import. Optional coded, crypto, torch and CUDA cases retain explicit
@@ -44,7 +51,8 @@ five-sample A1 arm medians/ranges/paired ratios without p95; retains p95 only
 for the 30-sample tail; separates application process startup from loader
 readiness across five child launches; surfaces the local signature/body-checking
 multipart failure and successful abort; and exercises changed-artifact cache
-refusal, refresh, range/no-range and restart-from-zero behavior. These are
+refusal, atomic-replacement refusal, invalid-existing refresh, range/no-range
+and restart-from-zero behavior. These are
 bounded local engineering facts and do not change the strategic evidence
 boundary.
 

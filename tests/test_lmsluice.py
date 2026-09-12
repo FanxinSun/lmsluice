@@ -32,6 +32,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1387,6 +1388,7 @@ class TestCache(unittest.TestCase):
 
         entry = cache.build(self.plain, codec="zstd")
         before = os.stat(self.plain)
+        before_generation = cache._source_generation(self.plain)
         before_key = cache.key_for(self.plain)
         with open(self.plain, "r+b") as fh:
             fh.seek(8)
@@ -1395,8 +1397,159 @@ class TestCache(unittest.TestCase):
             fh.write(bytes([original[0] ^ 0x01]))
         os.utime(self.plain, ns=(before.st_atime_ns, before.st_mtime_ns))
         self.assertEqual(cache.key_for(self.plain), before_key)
-        self.assertIsNone(cache.find(self.plain),
-                          "a same-size, same-mtime rewrite must miss the old entry")
+        after_generation = cache._source_generation(self.plain)
+        self.assertEqual(before_generation["size"], after_generation["size"])
+        self.assertEqual(before_generation["mtime_ns"], after_generation["mtime_ns"])
+        self.assertNotEqual(before_generation, after_generation)
+        with mock.patch.object(cache, "_source_sha256",
+                               side_effect=AssertionError("find hashed source")):
+            self.assertIsNone(
+                cache.find(self.plain),
+                "a same-size, same-mtime rewrite must miss through generation metadata")
+
+    def test_valid_find_reads_no_source_content_and_scales_by_metadata(self):
+        """A hit opens only its sidecar, even for a larger bounded fixture."""
+        from lmsluice import cache
+
+        with mock.patch.object(cache, "_root",
+                               return_value=os.path.join(self.dir, "cache")):
+            entry = cache.build(self.plain, codec="zstd")
+            larger = os.path.join(self.dir, "larger.bin")
+            with open(larger, "wb") as fh:
+                fh.write(self.ref)
+                fh.write(b"x" * (256 << 10))
+            larger_entry = cache.build(larger, codec="zstd")
+            for source, expected in ((self.plain, entry),
+                                     (larger, larger_entry)):
+                source_real = os.path.realpath(source)
+                real_open = open
+                source_open_calls = []
+
+                def audit_open(file, *args, **kwargs):
+                    candidate = os.path.realpath(os.fspath(file))
+                    if candidate == source_real:
+                        source_open_calls.append(candidate)
+                        raise AssertionError("cache.find opened source content")
+                    return real_open(file, *args, **kwargs)
+
+                with mock.patch("builtins.open", side_effect=audit_open):
+                    with mock.patch.object(
+                            cache, "_source_sha256",
+                            side_effect=AssertionError("cache.find hashed source")):
+                        self.assertEqual(cache.find(source), expected)
+                self.assertEqual(source_open_calls, [])
+            self.assertGreater(os.path.getsize(larger), os.path.getsize(self.plain))
+
+    def test_atomic_replacement_with_restored_stat_misses(self):
+        """Replacing a file changes its generation even when size/mtime return."""
+        from lmsluice import cache
+
+        with mock.patch.object(cache, "_root",
+                               return_value=os.path.join(self.dir, "cache")):
+            entry = cache.build(self.plain, codec="zstd")
+            before_stat = os.stat(self.plain)
+            before_generation = cache._source_generation(self.plain)
+            replacement = os.path.join(self.dir, "replacement.safetensors")
+            data = bytearray(self.ref)
+            data[700] ^= 0x01
+            with open(replacement, "wb") as fh:
+                fh.write(data)
+            os.utime(replacement, ns=(before_stat.st_atime_ns,
+                                      before_stat.st_mtime_ns))
+            os.replace(replacement, self.plain)
+            after_generation = cache._source_generation(self.plain)
+            self.assertEqual(before_generation["path"], after_generation["path"])
+            self.assertEqual(before_generation["size"], after_generation["size"])
+            self.assertEqual(before_generation["mtime_ns"], after_generation["mtime_ns"])
+            self.assertNotEqual(before_generation["file_id"],
+                                after_generation["file_id"])
+            with mock.patch.object(cache, "_source_sha256",
+                                   side_effect=AssertionError("find hashed source")):
+                self.assertIsNone(cache.find(self.plain))
+            with open(self.plain, "wb") as fh:
+                fh.write(self.ref)
+
+    def test_invalid_sidecars_miss_and_build_refreshes(self):
+        """Malformed, legacy and mismatched metadata never create a hit."""
+        from lmsluice import cache
+
+        with mock.patch.object(cache, "_root",
+                               return_value=os.path.join(self.dir, "cache")):
+            entry = cache.build(self.plain, codec="zstd")
+            sidecar = entry + ".json"
+            with open(sidecar, encoding="utf-8") as fh:
+                valid = json.load(fh)
+            os.unlink(sidecar)
+            self.assertIsNone(cache.find(self.plain), "missing sidecar")
+            bad_payloads = [
+                "{not-json",
+                "[]",
+                json.dumps({"source": valid["source"],
+                            "plain_bytes": valid["plain_bytes"],
+                            "coded_bytes": valid["coded_bytes"],
+                            "source_sha256": valid["source_sha256"]}),
+            ]
+            mismatched = dict(valid)
+            mismatched["source_generation"] = dict(valid["source_generation"])
+            mismatched["source_generation"]["file_id"] += 1
+            bad_payloads.append(json.dumps(mismatched))
+            for payload in bad_payloads:
+                with open(sidecar, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                self.assertIsNone(cache.find(self.plain), payload)
+
+            with mock.patch.object(cache, "_encoder",
+                                   wraps=cache._encoder) as encoder:
+                refreshed = cache.build(self.plain, codec="zstd", force=False)
+            self.assertEqual(refreshed, entry)
+            self.assertEqual(encoder.call_count, 1,
+                             "known-invalid sidecar must trigger a rebuild")
+            self.assertEqual(cache.find(self.plain), entry)
+            with open(sidecar, encoding="utf-8") as fh:
+                refreshed_meta = json.load(fh)
+            self.assertEqual(refreshed_meta["source_generation"],
+                             cache._source_generation(self.plain))
+
+    def test_source_change_during_encoding_discards_everything_unverified(self):
+        """A generation race cannot publish a usable entry or sidecar."""
+        from lmsluice import cache
+
+        class MutatingEncoder:
+            def encode(self, src, dst, **_opts):
+                with open(src, "rb") as source_fh:
+                    payload = source_fh.read()
+                with open(dst, "wb") as destination_fh:
+                    destination_fh.write(payload)
+                with open(src, "r+b") as source_fh:
+                    source_fh.seek(700)
+                    value = source_fh.read(1)
+                    source_fh.seek(700)
+                    source_fh.write(bytes([value[0] ^ 0x01]))
+
+        with mock.patch.object(cache, "_root",
+                               return_value=os.path.join(self.dir, "cache")):
+            destination = cache.entry_for(self.plain)
+            with mock.patch.object(cache, "_encoder",
+                                   return_value=("zstd", MutatingEncoder())):
+                with self.assertRaisesRegex(RuntimeError,
+                                             "source generation changed"):
+                    cache.build(self.plain, codec="zstd", force=True)
+            self.assertFalse(os.path.exists(destination + ".json"))
+            self.assertFalse(any(
+                name.startswith(os.path.basename(destination) + ".")
+                for name in os.listdir(cache.models_dir())))
+            with open(self.plain, "wb") as fh:
+                fh.write(self.ref)
+
+    def test_clear_removes_completed_entry_and_sidecar(self):
+        from lmsluice import cache
+
+        with mock.patch.object(cache, "_root",
+                               return_value=os.path.join(self.dir, "cache")):
+            entry = cache.build(self.plain, codec="zstd")
+            self.assertEqual(cache.clear(self.plain), 1)
+            self.assertFalse(os.path.exists(entry))
+            self.assertFalse(os.path.exists(entry + ".json"))
 
 
 class TestBoundary(unittest.TestCase):
