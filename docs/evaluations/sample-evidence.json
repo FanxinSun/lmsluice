@@ -2,20 +2,22 @@
   "schema": 1,
   "evidence_kind": "compact final campaign sample",
   "run": {
-    "path": "/tmp/lmsluice-device-readiness.mtdCGU",
+    "path": "/tmp/lmsluice-device-readiness.WKXRxT",
+    "tracked_export_commit": "38b8109a53b084ada6ee004193c68cd39e2479aa",
     "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
     "branch_at_run": "codex/portable-device-readiness",
     "commit_at_run": "64132d05f700ed1204a7a4f9f2d66454f7974d3d",
-    "summary_sha256": "8196d04adca53f845c737b5ddb89aca624103cb7a1b20998fb4664d06a1cd8f8",
-    "results_sha256": "7d4bc0aa3352f0fcdd2e5faee3de7cf6e0685155fc4a861d84e52e47972a086d",
-    "regression_log_sha256": "671d4aef58ccf133778e85beed51939788d92e199cb7db63df8b9c336542ae6d"
+    "summary_sha256": "746fd90f82d445209a9b498c668dafe06e544701f0a499c24f4684865fd60adb",
+    "results_sha256": "33d88ad082244935c1b9ff6b32a1e90cae2bca481b4aaf45ae687475cc195914",
+    "regression_log_sha256": "b131df310be9117c0a82ee504fd823007f19441bca54b2affab4211bbc32549e",
+    "clean_export_git_metadata": "unavailable by design; the export has no .git directory"
   },
   "fixture": {
     "version": "portable-device-readiness-fixture-v1",
     "plain_bytes": 145012,
     "plain_sha256": "067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c",
     "coded_bytes": 141227,
-    "coded_sha256": "f8c00ebe2b604f2a7e557a378825455e0bff2d51c71928aefa77bfb8db9f11e7",
+    "coded_sha256": "e7e490e9bae2efca9102de5d8f22613062a25544acdbc844ee9f005a9c15bf0e",
     "coded_hash_note": "container metadata is measured per run; do not use this as a portable identity"
   },
   "status_counts": {
@@ -29,20 +31,20 @@
     "bandwidth_plain": {
       "status": "PASS",
       "aggregate_cap_bytes_s": 98304,
-      "worker_rate_ratio_1_to_2": 1.002363291905036,
-      "observed_bytes_s": [97110.79415651583, 97340.29531023755]
+      "worker_rate_ratio_1_to_2": 1.0009357512953863,
+      "observed_bytes_s": [97160.96702269591, 97251.88552344839]
     },
     "bandwidth_coded": {
       "status": "PASS",
       "aggregate_cap_bytes_s": 98304,
-      "worker_rate_ratio_1_to_2": 1.0015524434461847,
-      "observed_bytes_s": [97720.86309999292, 97872.569213468]
+      "worker_rate_ratio_1_to_2": 1.0138763145272789,
+      "observed_bytes_s": [96542.02177214496, 97881.66923135465]
     },
     "memory_edge": {
       "status": "PASS",
       "tensor_bytes": 98304,
       "output_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970",
-      "peak_rss_bytes": 50077696
+      "peak_rss_bytes": 50421760
     },
     "noncontiguous_selection": {
       "status": "PASS",
@@ -78,18 +80,18 @@
       "plain_wins": 0,
       "coded_wins": 0,
       "first_fetch_median_s": {
-        "normal_loader": 0.0012274870005057892,
-        "lmsluice_plain": 0.0019294020003144396,
-        "lmsluice_stdlib_coded": 0.0019975329996668734
+        "normal_loader": 0.0016756670011091046,
+        "lmsluice_plain": 0.0019505680011207005,
+        "lmsluice_stdlib_coded": 0.0020382820002851076
       },
       "warm_reuse_median_s": {
-        "normal_loader": 0.0015263829991454259,
-        "lmsluice_plain": 0.002480520999597502,
-        "lmsluice_stdlib_coded": 0.005786617000921979
+        "normal_loader": 0.0011970409996138187,
+        "lmsluice_plain": 0.0016497119995619869,
+        "lmsluice_stdlib_coded": 0.0018410650009172969
       },
       "warm_tail_median_p95_s": {
-        "normal_loader": [0.001263043000108155, 0.00165717600066273],
-        "lmsluice_plain": [0.0018317775002287817, 0.006324927999230567]
+        "normal_loader": [0.0011958210006923764, 0.0012648840001929784],
+        "lmsluice_plain": [0.0016972539997368585, 0.0019168369999533752]
       },
       "unavailable_or_missing": ["target BOM", "power/thermal budget", "customer/host evidence"]
     },
@@ -106,6 +108,7 @@
   },
   "availability": {
     "cuda_driver": "detected",
+    "lmz": "absent from clean tracked export; stdlib zstd used",
     "torch": "absent",
     "cuda_alignment": "NOT_RUN",
     "real_customer": "UNAVAILABLE",

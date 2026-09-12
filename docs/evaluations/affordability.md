@@ -17,17 +17,17 @@ Observed medians from the final WSL2 run were:
 
 | scenario | normal loader | lmsluice plain | stdlib-coded |
 |---|---:|---:|---:|
-| first fetch | 0.001227 s | 0.001929 s | 0.001998 s |
-| warm reuse | 0.001526 s | 0.002481 s | 0.005787 s |
+| first fetch | 0.001676 s | 0.001951 s | 0.002038 s |
+| warm reuse | 0.001197 s | 0.001650 s | 0.001841 s |
 
 The five-sample arms do not support an empirical p95. In the 30-sample warm
-tail, the normal loader median/p95 were 0.001263/0.001657 s and lmsluice plain
-median/p95 were 0.001832/0.006325 s. Neither lmsluice arm beat the normal loader
-in the ten paired first-fetch/warm-reuse comparisons. These are small local synthetic timings,
+tail, the normal loader median/p95 were 0.001196/0.001265 s and lmsluice plain
+median/p95 were 0.001697/0.001917 s. Plain transport beat the normal loader in
+two paired samples and coded transport in one of the ten comparisons. These are small local synthetic timings,
 not a claim that lmsluice is slower or faster on a target device.
 
-The run had 16 logical CPUs, about 20.0 GiB available memory at setup and about
-45.4 GB free disk. The fixture was 145,012 bytes; the process plan stayed far
+The clean tracked-export run had 16 logical CPUs, about 16.8 GiB available memory
+at setup and about 12.2 GB free disk. The fixture was 145,012 bytes; the process plan stayed far
 below the 1 GiB working-set and 2 GiB run-storage limits. Host memory samples
 were collected per process. Allocator, device and energy costs were not
 measured. CUDA was detectable through lmsluice, but torch was absent, so the

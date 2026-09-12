@@ -8,9 +8,9 @@ run directory retained by the probe.
 
 | candidate | technical evidence | integration/support limit | customer evidence | recommendation |
 |---|---|---|---|---|
-| Restricted/private distribution | Local sealed archive loaded successfully; 0.002538 s total and exact output hash | Key distribution and policy remain external | Unavailable | Retain the mechanism evidence and defer a customer claim |
-| Bandwidth-constrained population | Local HTTP range path: 0.015402 s; no-range fallback: 0.007792 s; both exact output hashes | Reconnect policy, WAN behavior and durable publication remain unmeasured | Unavailable; loopback is only a proxy | Pursue a named target validation before making a market claim |
-| Switching specialized models | Language subset 0.002307 s; specialist subset 0.002205 s with the synthetic periodic task armed; output hashes passed | Residency, scheduling and runtime integration remain external | Unavailable; synthetic tasks are not application acceptance | Defer until a named runtime and switching cost are measured |
+| Restricted/private distribution | Local sealed archive loaded successfully; 0.002193 s total and exact output hash | Key distribution and policy remain external | Unavailable | Retain the mechanism evidence and defer a customer claim |
+| Bandwidth-constrained population | Local HTTP range path: 0.014529 s; no-range fallback: 0.008157 s; both exact output hashes | Reconnect policy, WAN behavior and durable publication remain unmeasured | Unavailable; loopback is only a proxy | Pursue a named target validation before making a market claim |
+| Switching specialized models | Language subset 0.001820 s; specialist subset 0.001936 s with the synthetic periodic task armed; output hashes passed | Residency, scheduling and runtime integration remain external | Unavailable; synthetic tasks are not application acceptance | Defer until a named runtime and switching cost are measured |
 
 The private workflow exercised the existing authenticated local mechanism. No
 historical credential, external secret, cloud write or real customer system was
