@@ -370,6 +370,8 @@ def _run_recorded_load(campaign: Campaign, path: str, expected_sha: str, *,
     facts.update({
         "duration_s": time.perf_counter() - started,
         "record": os.path.relpath(record_path, campaign.out),
+        "cache_condition": cache_condition,
+        "cold_method": cold_method,
         "first_tensor_s": _event_seconds(record_data, "first_tensor"),
         "first_useful_s": _event_seconds(record_data, "consumer_first_useful"),
         "ready_s": _event_seconds(record_data, "consumer_ready"),
