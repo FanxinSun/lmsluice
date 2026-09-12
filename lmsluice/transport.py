@@ -52,6 +52,9 @@ class Report:
     stalls_empty: int = 0        # place waited: fetching is behind
     fetch_threads: int = 0
     place_threads: int = 0
+    inflight: int = 0
+    failed: bool = False
+    error_type: str = ""
 
     @property
     def rate(self) -> float:
@@ -73,6 +76,26 @@ class Report:
         if self.stalls_empty > self.stalls_full * 2:
             return "fetch"
         return "balanced"
+
+    def to_dict(self) -> dict:
+        """A JSON-native additive view; the original fields stay unchanged."""
+        return {
+            "jobs": self.jobs,
+            "fetched_bytes": self.fetched_bytes,
+            "placed_bytes": self.placed_bytes,
+            "seconds": self.seconds,
+            "fetch_seconds": self.fetch_seconds,
+            "place_seconds": self.place_seconds,
+            "stalls_full": self.stalls_full,
+            "stalls_empty": self.stalls_empty,
+            "fetch_threads": self.fetch_threads,
+            "place_threads": self.place_threads,
+            "inflight": self.inflight,
+            "rate": self.rate,
+            "limited_by": self.limited_by,
+            "failed": self.failed,
+            "error_type": self.error_type or None,
+        }
 
 
 class _Abort:
@@ -109,7 +132,7 @@ class _Abort:
 
 def transport(jobs, fetch, place, *, fetch_threads: int = 8,
               place_threads: int = 2, inflight: int = 16,
-              progress=None) -> Report:
+              progress=None, observer=None, observe_transfer: bool = True) -> Report:
     """Run `fetch(job)` on one pool and `place(job, payload)` on another.
 
     `fetch` should be I/O and `place` should be the work: both must release
@@ -121,7 +144,12 @@ def transport(jobs, fetch, place, *, fetch_threads: int = 8,
     """
     jobs = list(jobs)
     if not jobs:
-        return Report(fetch_threads=fetch_threads, place_threads=place_threads)
+        rep = Report(fetch_threads=fetch_threads, place_threads=place_threads,
+                     inflight=max(1, inflight))
+        _notify(observer, "attach_report", rep)
+        if observe_transfer:
+            _notify(observer, "mark", "transfer_complete")
+        return rep
 
     fetch_threads = max(1, min(fetch_threads, len(jobs)))
     place_threads = max(1, min(place_threads, len(jobs)))
@@ -130,7 +158,7 @@ def transport(jobs, fetch, place, *, fetch_threads: int = 8,
     q: "queue.Queue" = queue.Queue(maxsize=inflight)
     abort = _Abort()
     rep = Report(jobs=len(jobs), fetch_threads=fetch_threads,
-                 place_threads=place_threads)
+                 place_threads=place_threads, inflight=inflight)
     lock = threading.Lock()
     cursor = iter(range(len(jobs)))
     cursor_lock = threading.Lock()
@@ -151,6 +179,7 @@ def transport(jobs, fetch, place, *, fetch_threads: int = 8,
                 payload = fetch(job)
                 spent += time.perf_counter() - t
                 got += _sizeof(payload)
+                _notify(observer, "mark", "first_payload", bytes=_sizeof(payload))
                 # Push against the bound rather than around it: if placing is
                 # behind, the fetch stage must wait, or the memory ceiling is
                 # a suggestion.
@@ -226,7 +255,17 @@ def transport(jobs, fetch, place, *, fetch_threads: int = 8,
         for t in fetchers + placers:
             t.join(timeout=5.0)
     rep.seconds = time.perf_counter() - started
-    abort.raise_if_failed()
+    try:
+        abort.raise_if_failed()
+    except BaseException as exc:
+        rep.failed = True
+        rep.error_type = type(exc).__name__
+        _notify(observer, "failure_event", exc, phase="transport")
+        _notify(observer, "attach_report", rep)
+        raise
+    _notify(observer, "attach_report", rep)
+    if observe_transfer:
+        _notify(observer, "mark", "transfer_complete")
     return rep
 
 
@@ -250,6 +289,20 @@ def _sizeof(obj) -> int:
         return len(obj)
     except TypeError:
         return 0
+
+
+def _notify(observer, method: str, *args, **kwargs) -> None:
+    """Observation is opt-in and must never change transport behavior."""
+    if observer is None:
+        return
+    try:
+        callback = getattr(observer, method, None)
+        if callback is not None:
+            callback(*args, **kwargs)
+    except Exception:
+        # A metrics sink is diagnostic. It cannot turn a successful load into
+        # a failed one, nor hide the original transport exception.
+        return
 
 
 def split(total: int, target: int, base: int = 0) -> list[tuple[int, int]]:

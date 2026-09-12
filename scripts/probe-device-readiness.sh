@@ -1,0 +1,90 @@
+#!/bin/bash
+# Run the complete portable-device readiness campaign from any working
+# directory. The output directory is fresh and is deliberately retained.
+
+set -u
+
+script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+output_root="${LMSLUICE_DEVICE_READINESS_OUT:-${TMPDIR:-/tmp}}"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "FAIL: python3 is required; no run directory was created" >&2
+    exit 2
+fi
+
+if [ ! -d "$output_root" ] && ! mkdir -p "$output_root"; then
+    printf '%s\n' "FAIL: cannot create output root: $output_root" >&2
+    exit 2
+fi
+
+run_dir="$(mktemp -d "$output_root/lmsluice-device-readiness.XXXXXX")"
+if [ -z "$run_dir" ] || [ ! -d "$run_dir" ]; then
+    printf '%s\n' "FAIL: cannot create a fresh readiness run directory" >&2
+    exit 2
+fi
+
+log_path="$run_dir/probe.log"
+index_path="$run_dir/result-index.txt"
+preflight_status=0
+
+for required_path in \
+    "$repo_root/lmsluice/__init__.py" \
+    "$repo_root/lmsluice/observability.py" \
+    "$repo_root/experiments/device_readiness/harness.py" \
+    "$repo_root/experiments/device_readiness/fixtures.py"; do
+    if [ ! -f "$required_path" ]; then
+        printf 'missing tracked input: %s\n' "$required_path" >> "$log_path"
+        preflight_status=2
+    fi
+done
+
+if [ "$preflight_status" -eq 0 ]; then
+    (
+        cd "$repo_root" || exit 2
+        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -c 'import experiments.device_readiness.harness, lmsluice.observability' \
+            >> "$log_path" 2>&1
+    ) || preflight_status=$?
+fi
+
+campaign_status=0
+if [ "$preflight_status" -eq 0 ]; then
+    (
+        cd "$repo_root" || exit 2
+        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -m experiments.device_readiness.harness \
+            --out "$run_dir" --repo-root "$repo_root"
+    ) >"$log_path" 2>&1
+    campaign_status=$?
+else
+    campaign_status="$preflight_status"
+fi
+
+summary_status="unavailable"
+summary_hash="unavailable"
+if [ -f "$run_dir/summary.json" ]; then
+    summary_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("engineering_status", "unavailable"))' "$run_dir/summary.json" 2>/dev/null)"
+    summary_hash="$(python3 -c 'import hashlib,sys; h=hashlib.sha256(); f=open(sys.argv[1], "rb"); h.update(f.read()); f.close(); print(h.hexdigest())' "$run_dir/summary.json" 2>/dev/null)"
+fi
+
+{
+    printf 'repository=%s\n' "$repo_root"
+    printf 'run_directory=%s\n' "$run_dir"
+    printf 'campaign_exit=%s\n' "$campaign_status"
+    printf 'engineering_status=%s\n' "$summary_status"
+    printf 'summary_sha256=%s\n' "$summary_hash"
+    printf 'summary=%s\n' "$run_dir/summary.json"
+    printf 'results=%s\n' "$run_dir/results.jsonl"
+    printf 'log=%s\n' "$log_path"
+    printf 'records=%s\n' "$run_dir/records"
+    printf 'errors=%s\n' "$run_dir/errors"
+} > "$index_path"
+
+printf 'portable-device-readiness: %s\n' \
+    "$(if [ "$campaign_status" -eq 0 ]; then printf PASS; else printf FAIL; fi)"
+printf 'run directory: %s\n' "$run_dir"
+printf 'result index: %s\n' "$index_path"
+printf 'summary: %s\n' "$run_dir/summary.json"
+printf 'campaign exit: %s\n' "$campaign_status"
+exit "$campaign_status"

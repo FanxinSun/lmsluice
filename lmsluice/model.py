@@ -92,8 +92,10 @@ class Model:
     def __init__(self, target: str, *, profile: Profile | None = None,
                  prefer: str | None = None, member: str | None = None,
                  fetch_threads: int | None = None,
-                 place_threads: int | None = None, cache: str = "auto"):
+                 place_threads: int | None = None, cache: str = "auto",
+                 observer=None):
         self.target = target
+        self.observer = observer
         self.route = "plain"
         self._arc: Archive | None = None
         self._src = None
@@ -105,6 +107,9 @@ class Model:
         self._want_place = place_threads
 
         src = open_source(target)
+        _observe(observer, "mark", "source_open", source=target,
+                 size=getattr(src, "size", None),
+                 random_access=getattr(src, "random_access", None))
         coded = _is_coded(src)
         if not coded and cache != "off" and isinstance(src, FileSource):
             # An existing cache entry is used without being asked; building one
@@ -147,6 +152,12 @@ class Model:
 
         self.profile = profile if profile is not None else Profile.load()
         self.plan = self._make_plan()
+        _observe(self.observer, "set_route", planned=self.plan.decision.chosen.name,
+                 actual=self.route, source=self.target,
+                 codec=("stdlib" if self.route == "coded" else "plain"),
+                 cipher=("encrypted" if self.encrypted is not None else "none"))
+        _observe(self.observer, "mark", "route_planned",
+                 route=self.plan.decision.chosen.name, actual=self.route)
         if prefer in ("plain", "coded") and prefer != self.route:
             # A caller may override, and is told rather than silently obeyed:
             # asking for the coded route on a plain file is not something this
@@ -228,7 +239,7 @@ class Model:
             self._mm_access = want
         return memoryview(self._mm)
 
-    def load(self, names=None, into=None) -> memoryview:
+    def load(self, names=None, into=None, *, observer=None) -> memoryview:
         """Read tensors for real, in parallel, into one buffer.
 
         With `names`, only the ranges holding those tensors are moved -- and
@@ -241,8 +252,14 @@ class Model:
         than absent, which keeps `tensor()` working on one buffer whatever
         subset built it.
         """
+        observer = self.observer if observer is None else observer
+        selected = (list(self.tensors) if names is None else list(names))
         spans = ([(self._base, self._end)] if names is None
-                 else self.span_of(names))
+                 else self.span_of(selected))
+        _observe(observer, "mark", "allocation", bytes=self.plain_bytes,
+                 provided_buffer=into is not None, destination="host")
+        _observe(observer, "add_coverage", requested_spans=len(spans),
+                 requested_bytes=sum(max(0, hi - lo) for lo, hi in spans))
         buf = into if into is not None else destination(self.plain_bytes)
         if len(buf) < self.plain_bytes:
             raise ValueError(f"buffer holds {len(buf)}, member needs "
@@ -252,10 +269,14 @@ class Model:
         # not in this buffer. `_gather` handles the ends; here the member
         # buffer is the whole of what the caller sees.
         self._gather(spans, into=buf, base=self._base,
-                     limit=(self._base, self._end))
+                     limit=(self._base, self._end), observer=observer)
+        if selected:
+            first_name = min(selected, key=lambda item: self.tensors[item].start)
+            _observe(observer, "mark", "first_tensor", name=first_name,
+                     bytes=self.tensors[first_name].nbytes)
         return memoryview(buf)[:self.plain_bytes]
 
-    def stream(self, names=None, *, budget: int = STREAM_BUDGET):
+    def stream(self, names=None, *, budget: int = STREAM_BUDGET, observer=None):
         """Yield (name, view) as tensors land, holding at most `budget` bytes.
 
         Each window is dropped before the next is read, so a consumer that
@@ -265,16 +286,43 @@ class Model:
         the ceiling is a target, and a single weight matrix that exceeds it is
         the caller's arithmetic to fix, not this function's to fail on.
         """
+        observer = self.observer if observer is None else observer
         order = sorted(names or self.tensors, key=lambda n: self.tensors[n].start)
-        for group in _windows(order, self.tensors, budget):
-            lo = self.tensors[group[0]].start
-            hi = max(self.tensors[n].end for n in group)
-            base, buf = self._gather([(lo, hi)])
-            view = memoryview(buf)
-            for name in group:
-                t = self.tensors[name]
-                yield name, view[t.start - base:t.end - base]
-            del view, buf
+        request_complete = False
+        try:
+            for group in _windows(order, self.tensors, budget):
+                lo = self.tensors[group[0]].start
+                hi = max(self.tensors[n].end for n in group)
+                _observe(observer, "mark", "allocation", bytes=hi - lo,
+                         provided_buffer=False, destination="host_window")
+                _observe(observer, "mark", "staging", bytes=hi - lo,
+                         tensor_count=len(group), budget=budget)
+                _observe(observer, "add_coverage", requested_spans=1,
+                         requested_bytes=hi - lo, tensor_window_bytes=hi - lo,
+                         largest_tensor_bytes=max(self.tensors[n].nbytes for n in group))
+                group_complete = False
+                view = buf = None
+                try:
+                    base, buf = self._gather([(lo, hi)], observer=observer,
+                                             observe_transfer=False)
+                    view = memoryview(buf)
+                    for name in group:
+                        t = self.tensors[name]
+                        _observe(observer, "mark", "first_tensor", name=name,
+                                 bytes=t.nbytes)
+                        yield name, view[t.start - base:t.end - base]
+                    group_complete = True
+                finally:
+                    if view is not None:
+                        del view
+                    if buf is not None:
+                        del buf
+                if not group_complete:
+                    return
+            request_complete = True
+        finally:
+            if request_complete:
+                _observe(observer, "mark", "transfer_complete")
 
     # Plain bytes staged through one pinned window. Two of these exist at a
     # time so a copy can overlap the next fill, and the size is a parameter
@@ -304,6 +352,10 @@ class Model:
         own_ctx = context is None
         window = window or self.WINDOW
         chosen = route or ("device" if self.route == "coded" else "plain")
+        _observe(self.observer, "mark", "allocation", bytes=self.plain_bytes,
+                 provided_buffer=False, destination="device")
+        _observe(self.observer, "mark", "staging", bytes=window,
+                 destination="device", route=chosen)
 
         if chosen == "device" and self.route == "coded":
             # Coded bytes cross PCIe and are turned into plaintext where they
@@ -452,7 +504,8 @@ class Model:
         return len(buf)
 
     # -- the pipeline -----------------------------------------------------
-    def _gather(self, spans, *, into=None, base=None, limit=None):
+    def _gather(self, spans, *, into=None, base=None, limit=None,
+                observer=None, observe_transfer=True):
         """Fill a buffer with `spans`, and say where the buffer starts.
 
         On the coded route the buffer has to hold whole blocks, which reach
@@ -470,12 +523,15 @@ class Model:
                 into, base = destination(max(0, hi - lo)), lo
             elif base is None:
                 base = lo
+            _observe(observer, "add_coverage", covered_spans=len(runs),
+                     covered_bytes=max(0, hi - lo))
             self.last = transport(
                 runs, arc.fetch,
                 lambda r, p: arc.place(r, p, into, base, clip=(lo, hi)),
                 fetch_threads=self._fetch_threads,
                 place_threads=self._place_threads,
-                inflight=max(4, self._fetch_threads * 2))
+                inflight=max(4, self._fetch_threads * 2), observer=observer,
+                observe_transfer=observe_transfer)
             return base, into
 
         lo = min(a for a, _ in spans)
@@ -484,10 +540,14 @@ class Model:
             into, base = destination(hi - lo), lo
         elif base is None:
             base = lo
-        self._fill(spans, into, base)
+        _observe(observer, "add_coverage", covered_spans=len(spans),
+                 covered_bytes=max(0, hi - lo))
+        self._fill(spans, into, base, observer=observer,
+                   observe_transfer=observe_transfer)
         return base, into
 
-    def _fill(self, spans, buf, base: int):
+    def _fill(self, spans, buf, base: int, *, observer=None,
+              observe_transfer=True):
         """Move every span into `buf`, which begins at plain offset `base`."""
         src, jobs = self._src, []
         for lo, hi in spans:
@@ -503,7 +563,8 @@ class Model:
             jobs, lambda j: src.pread(j[0], j[1]), place,
             fetch_threads=self._fetch_threads,
             place_threads=max(1, self._place_threads // 2),
-            inflight=max(4, self._fetch_threads * 2))
+            inflight=max(4, self._fetch_threads * 2), observer=observer,
+            observe_transfer=observe_transfer)
         return self.last
 
     # -- deciding ---------------------------------------------------------
@@ -633,6 +694,20 @@ def _is_coded(src) -> bool:
     # An encrypted envelope counts, whatever it wraps: it is never mappable,
     # so the plain route cannot serve it even when the file inside is plain.
     return head[:4] == b"LMZ\x01" or head in (b"LMSLUICE", b"LMSLSEAL")
+
+
+def _observe(observer, method: str, *args, **kwargs) -> None:
+    """Keep optional observation out of the loader's correctness path."""
+    if observer is None:
+        return
+    try:
+        callback = getattr(observer, method, None)
+        if callback is not None:
+            callback(*args, **kwargs)
+    except Exception:
+        # Metrics are useful only when they are harmless. The original load
+        # result or exception remains authoritative if a sink is unavailable.
+        return
 
 
 def _safetensors_index(src, member: str) -> dict:

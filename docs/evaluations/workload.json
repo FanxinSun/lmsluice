@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "name": "portable-device-readiness-workload",
+  "status": "frozen synthetic contract",
+  "purpose": "Exercise language, speech, vision, specialist and memory-edge movement without making model-quality claims.",
+  "generator": {
+    "module": "experiments.device_readiness.fixtures",
+    "function": "generate_bundle",
+    "fixture_version": "portable-device-readiness-fixture-v1",
+    "seed": 7,
+    "compression_chunk_bytes": 32768
+  },
+  "plain_artifact": {
+    "path": "portable-workload.safetensors",
+    "format": "safetensors-compatible synthetic file",
+    "bytes": 145012,
+    "header_bytes": 628,
+    "tensor_data_bytes": 144384,
+    "sha256": "067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c"
+  },
+  "coded_artifact": {
+    "path": "portable-workload.lmsluice",
+    "format": "lmsluice stdlib-coded archive",
+    "same_plaintext_contract": true,
+    "sha256_policy": "per-run only: the archive records measured codec metadata and therefore its container hash is machine/run dependent",
+    "unavailable_policy": "record SKIP with the backend reason; do not substitute a different artifact"
+  },
+  "auxiliary_artifacts": [
+    {
+      "path": "low-compressibility.bin",
+      "bytes": 49152,
+      "sha256": "c0fa8b4c737769c21485383d0e480d9f1feeacfa60d6dbcbeff51f3c05308c5f",
+      "purpose": "Keep link and low-compressibility behavior separate from the named tensor contract."
+    }
+  ],
+  "tensors": [
+    {
+      "name": "language.embed.weight",
+      "role": "language",
+      "dtype": "BF16",
+      "shape": [48, 128],
+      "bytes": 12288,
+      "consumer_payload_sha256": "9c2db72e2562d4faa15fd946bf0fc9bf55d90e6acd5c1f121aac6b7943ec18e7"
+    },
+    {
+      "name": "asr.encoder.weight",
+      "role": "speech-in",
+      "dtype": "F32",
+      "shape": [16, 64],
+      "bytes": 4096
+    },
+    {
+      "name": "tts.decoder.weight",
+      "role": "speech-out",
+      "dtype": "F16",
+      "shape": [24, 64],
+      "bytes": 3072
+    },
+    {
+      "name": "vision.patch.weight",
+      "role": "vision",
+      "dtype": "U8",
+      "shape": [64, 96],
+      "bytes": 6144,
+      "consumer_payload_sha256": "a26147485d0b429dc24735b8c51b77f35ba52ce5dfb439f3bac7586961512c7a"
+    },
+    {
+      "name": "specialist.task.weight",
+      "role": "specialist",
+      "dtype": "BF16",
+      "shape": [80, 128],
+      "bytes": 20480,
+      "consumer_payload_sha256": "0a15e1194995aac7a64139905c9ea04b41854b691a7d8c2e9a03f92cb86674ce"
+    },
+    {
+      "name": "oversized.tensor",
+      "role": "memory-edge",
+      "dtype": "U8",
+      "shape": [98304],
+      "bytes": 98304,
+      "consumer_payload_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970"
+    }
+  ],
+  "consumer_outputs": {
+    "full_file_load_sha256": "067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c",
+    "all_tensor_payload_sha256": "997f1a3e858bcb693115bceef939864e0be55ea6be5a5da30ccb0c7f268ecb4d",
+    "language_vision_specialist_payload_sha256": "dc62de6cc5afc83890d5d7cd69d997196987873295f23f41e082f9a069031af1",
+    "interpretation": "A matching hash proves byte preservation for this fixture and consumer; it says nothing about speech, vision or language quality."
+  },
+  "route_contract": {
+    "plain": "transport the original bytes through the bounded two-stage path",
+    "coded": "transport coded ranges, decode and place into a plaintext buffer",
+    "http_range": "exercise range reads when the source advertises and honors them",
+    "http_no_range": "exercise the existing fallback when the source returns a full response",
+    "sealed": "exercise local authenticated private distribution only when the existing crypto backend is available"
+  },
+  "measurement_rules": {
+    "cache": "Use cache=off for loader arms; report whether a host cold read was actually controllable.",
+    "resource_scope": "Bounded current-process RSS/PSS/HWM sampling; child pages, allocator-specific, device and energy counters remain explicit UNMEASURED when unavailable.",
+    "time_events": "All readiness events use one time.monotonic_ns origin. Missing consumer events are null, not zero.",
+    "parallelism": "The campaign compares one and two fetch workers under one shared aggregate cap; extra threads must not be read as extra link capacity.",
+    "failure": "Induced failures remain in results.jsonl and errors/; detection rows carry the engineering verdict.",
+    "strategic_evidence": "Local fixtures establish mechanism behavior. Real device, host, customer, cost and authenticated-store evidence is reported unavailable unless supplied."
+  }
+}

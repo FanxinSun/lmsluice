@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "evidence_kind": "compact final campaign sample",
+  "run": {
+    "path": "/tmp/lmsluice-device-readiness.mtdCGU",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "branch_at_run": "codex/portable-device-readiness",
+    "commit_at_run": "64132d05f700ed1204a7a4f9f2d66454f7974d3d",
+    "summary_sha256": "8196d04adca53f845c737b5ddb89aca624103cb7a1b20998fb4664d06a1cd8f8",
+    "results_sha256": "7d4bc0aa3352f0fcdd2e5faee3de7cf6e0685155fc4a861d84e52e47972a086d",
+    "regression_log_sha256": "671d4aef58ccf133778e85beed51939788d92e199cb7db63df8b9c336542ae6d"
+  },
+  "fixture": {
+    "version": "portable-device-readiness-fixture-v1",
+    "plain_bytes": 145012,
+    "plain_sha256": "067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c",
+    "coded_bytes": 141227,
+    "coded_sha256": "f8c00ebe2b604f2a7e557a378825455e0bff2d51c71928aefa77bfb8db9f11e7",
+    "coded_hash_note": "container metadata is measured per run; do not use this as a portable identity"
+  },
+  "status_counts": {
+    "PASS": 141,
+    "FAIL": 7,
+    "NOT_RUN": 1,
+    "INCONCLUSIVE": 1
+  },
+  "engineering_verdict": "PASS",
+  "selected_engineering": {
+    "bandwidth_plain": {
+      "status": "PASS",
+      "aggregate_cap_bytes_s": 98304,
+      "worker_rate_ratio_1_to_2": 1.002363291905036,
+      "observed_bytes_s": [97110.79415651583, 97340.29531023755]
+    },
+    "bandwidth_coded": {
+      "status": "PASS",
+      "aggregate_cap_bytes_s": 98304,
+      "worker_rate_ratio_1_to_2": 1.0015524434461847,
+      "observed_bytes_s": [97720.86309999292, 97872.569213468]
+    },
+    "memory_edge": {
+      "status": "PASS",
+      "tensor_bytes": 98304,
+      "output_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970",
+      "peak_rss_bytes": 50077696
+    },
+    "noncontiguous_selection": {
+      "status": "PASS",
+      "output_sha256": "dc62de6cc5afc83890d5d7cd69d997196987873295f23f41e082f9a069031af1",
+      "covered_bytes": 65536,
+      "requested_bytes": 38912
+    },
+    "consumer_departure": {
+      "status": "PASS",
+      "workers_after_close": [],
+      "consumer_ready_event": null
+    },
+    "retry": {
+      "status": "PASS",
+      "first_attempt": "ConnectionResetError",
+      "semantics": "restart from zero",
+      "repeated_bytes": 145012
+    }
+  },
+  "induced_failure_evidence": [
+    {"case": "fault-source-reset", "status": "FAIL", "detected": true, "error": "ConnectionResetError"},
+    {"case": "fault-truncated-range", "status": "FAIL", "detected": true, "error": "EOFError"},
+    {"case": "fault-corrupt-coded", "status": "FAIL", "detected": true, "error": "zlib.error"},
+    {"case": "fault-destination-bounds", "status": "FAIL", "detected": true, "error": "ValueError"},
+    {"case": "fault-destination-unwritable", "status": "FAIL", "detected": true, "error": "TypeError"},
+    {"case": "fault-wrong-key", "status": "FAIL", "detected": true, "error": "ValueError"},
+    {"case": "fault-tampered-ciphertext", "status": "FAIL", "detected": true, "error": "ValueError"}
+  ],
+  "strategic": {
+    "A1": {
+      "status": "INCONCLUSIVE",
+      "sample_count": 30,
+      "plain_wins": 0,
+      "coded_wins": 0,
+      "first_fetch_median_s": {
+        "normal_loader": 0.0012274870005057892,
+        "lmsluice_plain": 0.0019294020003144396,
+        "lmsluice_stdlib_coded": 0.0019975329996668734
+      },
+      "warm_reuse_median_s": {
+        "normal_loader": 0.0015263829991454259,
+        "lmsluice_plain": 0.002480520999597502,
+        "lmsluice_stdlib_coded": 0.005786617000921979
+      },
+      "warm_tail_median_p95_s": {
+        "normal_loader": [0.001263043000108155, 0.00165717600066273],
+        "lmsluice_plain": [0.0018317775002287817, 0.006324927999230567]
+      },
+      "unavailable_or_missing": ["target BOM", "power/thermal budget", "customer/host evidence"]
+    },
+    "B1": {
+      "status": "INCONCLUSIVE",
+      "private_sealed": "PASS",
+      "http_range": "PASS",
+      "http_no_range": "PASS",
+      "switch_language": "PASS",
+      "switch_specialist": "PASS",
+      "customer_evidence": "UNAVAILABLE",
+      "selection": "manager retains final niche decision"
+    }
+  },
+  "availability": {
+    "cuda_driver": "detected",
+    "torch": "absent",
+    "cuda_alignment": "NOT_RUN",
+    "real_customer": "UNAVAILABLE",
+    "real_authenticated_cloud": "UNAVAILABLE"
+  }
+}
