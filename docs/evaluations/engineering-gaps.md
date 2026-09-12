@@ -1,11 +1,14 @@
 # Engineering fixes and remaining gaps
 
-The final campaign on WSL2 completed with engineering status `PASS`: 141
-positive rows, seven induced `FAIL` evidence rows, one explicit target
-`NOT_RUN` row and one strategic `INCONCLUSIVE` row. The induced failures are
-expected inputs to the fault campaign, not hidden regressions. Each has a
-separate detection row that passed, and the complete traceback remains under
-the run's `errors/` directory.
+The correction campaign is identified by the exact source commit in its
+`manifest.json`; the tracked [`final-evidence.json`](final-evidence.json)
+resolves that commit in a Git archive. It completes with engineering status
+`PASS` when required failures are empty. Its exact row counts, every positive,
+negative, induced-failure, `NOT_RUN`, unavailable and inconclusive result, and
+archive hashes are in the required correction report and retained run output.
+Induced failures are expected inputs to the fault campaign, not hidden
+regressions. Each has a separate detection row, and the complete traceback
+remains under the run's `errors/` directory.
 
 During implementation and focused tests, these in-scope issues were found and
 fixed before the final run:
@@ -34,6 +37,16 @@ HTTP range, HTTP no-range and selected specialist paths. Reset, truncation,
 corruption, destination bounds, unwritable destination, wrong key and tampered
 ciphertext all propagated as expected. A retry after an injected reset starts
 from zero and records 145,012 repeated bytes; durable resume is not claimed.
+
+The correction additionally measures event-only and sampled observer overhead
+against the same uninstrumented path with 30 balanced pairs each; reports
+five-sample A1 arm medians/ranges/paired ratios without p95; retains p95 only
+for the 30-sample tail; separates application process startup from loader
+readiness across five child launches; surfaces the local signature/body-checking
+multipart failure and successful abort; and exercises changed-artifact cache
+refusal, refresh, range/no-range and restart-from-zero behavior. These are
+bounded local engineering facts and do not change the strategic evidence
+boundary.
 
 Remaining gaps have clear evidence boundaries:
 

@@ -9,6 +9,14 @@ tensors, plus a 96 KiB tensor that deliberately exceeds the 32 KiB stream
 target. The tensor roles make route and consumer accounting possible without
 pretending that the fixture is an ASR, TTS, vision or language benchmark.
 
+Contract schema 2 records synthetic provenance, repository license
+applicability, the absence of required sidecars, parser/runtime compatibility,
+and the boundary between transport evidence and a real consumer. Plain bytes
+are always available; stdlib-coded and optional lmz-coded routes retain their
+capability reason when unavailable. Every role uses seed 7 with a fixed input
+hash and exact output hash. No audio, image, prompt or real application
+acceptance fixture is available.
+
 The plain artifact is 145,012 bytes: a 628 byte header and 144,384 bytes of
 tensor data. Its SHA-256 is frozen. The stdlib-coded archive carries the same
 plaintext contract, but its container includes measured codec metadata, so its

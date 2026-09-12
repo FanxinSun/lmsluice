@@ -1,8 +1,59 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "contract_version": "portable-device-readiness-contract-v2",
   "name": "portable-device-readiness-workload",
   "status": "frozen synthetic contract",
   "purpose": "Exercise language, speech, vision, specialist and memory-edge movement without making model-quality claims.",
+  "provenance": {
+    "kind": "synthetic_generated",
+    "generator_source": "experiments/device_readiness/fixtures.py",
+    "generator_function": "generate_bundle",
+    "external_data_or_model": "none",
+    "license_status": "no external model or dataset license applies; generator and contract are governed by this repository's LICENSE",
+    "real_application_acceptance": "UNAVAILABLE; no real audio, image, prompt or application fixture was supplied"
+  },
+  "sidecars": {
+    "required": false,
+    "files": [],
+    "status": "none required for the frozen transport fixture",
+    "missing_input": "UNAVAILABLE; no model-specific tokenizer, feature, prompt, label or serving sidecar was supplied"
+  },
+  "compatibility": {
+    "parser": "lmsluice safetensors-compatible parser and lmsluice archive reader",
+    "runtime": "Python standard library plus the repository source; stdlib-coded availability is conditional on compression.zstd or zstandard",
+    "transport_only": true,
+    "transport_only_meaning": "successful byte movement and hash preservation do not constitute a real consumer",
+    "real_consumers": {
+      "language": "UNAVAILABLE; no tokenizer or language runtime fixture",
+      "speech_in_asr": "UNAVAILABLE; no audio waveform, feature extractor or ASR runtime fixture",
+      "speech_out_tts": "UNAVAILABLE; no text/audio acceptance fixture or TTS runtime fixture",
+      "vision": "UNAVAILABLE; no image preprocessing or vision runtime fixture",
+      "specialist": "UNAVAILABLE; no application task or specialist runtime fixture"
+    }
+  },
+  "availability_policy": {
+    "plain": "always generate and test when Python and repository source are available",
+    "stdlib_coded": "generate and test when the configured interpreter exposes compression.zstd or zstandard; otherwise retain an explicit NOT_RUN/SKIP reason",
+    "lmz_coded": "optional capability only when importable in the already configured interpreter; never install, search sibling checkouts or substitute its evidence",
+    "real_target": "UNAVAILABLE unless an approved device, host, link and workload are supplied"
+  },
+  "input_output_contract": {
+    "fixed_seed": 7,
+    "fixed_generator": "experiments.device_readiness.fixtures.generate_bundle",
+    "generated_input": "deterministic hash stream keyed by fixture version, seed, role label and counter; BF16-like roles additionally use a fixed exponent-band transform",
+    "output_equivalence_method": "SHA-256 of the exact consumer-visible tensor bytes in file order; route output must match the frozen expected digest",
+    "audio_fixture": "UNAVAILABLE",
+    "image_fixture": "UNAVAILABLE",
+    "prompt_fixture": "UNAVAILABLE",
+    "real_application_acceptance_fixture": "UNAVAILABLE"
+  },
+  "evidence_classes": {
+    "synthetic_transport": "local deterministic bytes prove movement, integrity and bounded resource mechanics only",
+    "simulated_constraint": "local limiter, fault injector or loopback server; proxy evidence, not a device/WAN result",
+    "optional_backend": "capability result from an already configured interpreter; NOT_RUN is retained when absent",
+    "real_target": "UNAVAILABLE in this campaign",
+    "customer_or_affordability": "UNAVAILABLE/INCONCLUSIVE without approved host, power, thermal, cost, volume or customer evidence"
+  },
   "generator": {
     "module": "experiments.device_readiness.fixtures",
     "function": "generate_bundle",
@@ -40,21 +91,35 @@
       "dtype": "BF16",
       "shape": [48, 128],
       "bytes": 12288,
-      "consumer_payload_sha256": "9c2db72e2562d4faa15fd946bf0fc9bf55d90e6acd5c1f121aac6b7943ec18e7"
+      "input_sha256": "9c2db72e2562d4faa15fd946bf0fc9bf55d90e6acd5c1f121aac6b7943ec18e7",
+      "consumer_payload_sha256": "9c2db72e2562d4faa15fd946bf0fc9bf55d90e6acd5c1f121aac6b7943ec18e7",
+      "synthetic_input": {"label": "language", "seed": 7, "generator": "bf16_like", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "9c2db72e2562d4faa15fd946bf0fc9bf55d90e6acd5c1f121aac6b7943ec18e7", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     },
     {
       "name": "asr.encoder.weight",
       "role": "speech-in",
       "dtype": "F32",
       "shape": [16, 64],
-      "bytes": 4096
+      "bytes": 4096,
+      "input_sha256": "3542cc70456fc45b2c1c215eaa395afa50627192b4a7be267f192591e9a34a34",
+      "consumer_payload_sha256": "3542cc70456fc45b2c1c215eaa395afa50627192b4a7be267f192591e9a34a34",
+      "synthetic_input": {"label": "asr", "seed": 7, "generator": "deterministic_bytes", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "3542cc70456fc45b2c1c215eaa395afa50627192b4a7be267f192591e9a34a34", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     },
     {
       "name": "tts.decoder.weight",
       "role": "speech-out",
       "dtype": "F16",
       "shape": [24, 64],
-      "bytes": 3072
+      "bytes": 3072,
+      "input_sha256": "df4f7d53c3c5b99d5d6015935e3d0641928e94439d8b427d23ec866f45c343a5",
+      "consumer_payload_sha256": "df4f7d53c3c5b99d5d6015935e3d0641928e94439d8b427d23ec866f45c343a5",
+      "synthetic_input": {"label": "tts", "seed": 7, "generator": "deterministic_bytes", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "df4f7d53c3c5b99d5d6015935e3d0641928e94439d8b427d23ec866f45c343a5", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     },
     {
       "name": "vision.patch.weight",
@@ -62,7 +127,11 @@
       "dtype": "U8",
       "shape": [64, 96],
       "bytes": 6144,
-      "consumer_payload_sha256": "a26147485d0b429dc24735b8c51b77f35ba52ce5dfb439f3bac7586961512c7a"
+      "input_sha256": "a26147485d0b429dc24735b8c51b77f35ba52ce5dfb439f3bac7586961512c7a",
+      "consumer_payload_sha256": "a26147485d0b429dc24735b8c51b77f35ba52ce5dfb439f3bac7586961512c7a",
+      "synthetic_input": {"label": "vision", "seed": 7, "generator": "deterministic_bytes", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "a26147485d0b429dc24735b8c51b77f35ba52ce5dfb439f3bac7586961512c7a", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     },
     {
       "name": "specialist.task.weight",
@@ -70,7 +139,11 @@
       "dtype": "BF16",
       "shape": [80, 128],
       "bytes": 20480,
-      "consumer_payload_sha256": "0a15e1194995aac7a64139905c9ea04b41854b691a7d8c2e9a03f92cb86674ce"
+      "input_sha256": "0a15e1194995aac7a64139905c9ea04b41854b691a7d8c2e9a03f92cb86674ce",
+      "consumer_payload_sha256": "0a15e1194995aac7a64139905c9ea04b41854b691a7d8c2e9a03f92cb86674ce",
+      "synthetic_input": {"label": "specialist", "seed": 7, "generator": "bf16_like", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "0a15e1194995aac7a64139905c9ea04b41854b691a7d8c2e9a03f92cb86674ce", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     },
     {
       "name": "oversized.tensor",
@@ -78,7 +151,11 @@
       "dtype": "U8",
       "shape": [98304],
       "bytes": 98304,
-      "consumer_payload_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970"
+      "input_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970",
+      "consumer_payload_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970",
+      "synthetic_input": {"label": "oversized", "seed": 7, "generator": "deterministic_bytes", "real_fixture": "UNAVAILABLE"},
+      "output_equivalence": {"method": "SHA-256 exact tensor bytes", "expected_sha256": "fa9410f93304dc9f9efe530342421e60df4bcca74be07b1ae09fe7d3c0973970", "quality_signal": "UNAVAILABLE"},
+      "evidence_class": "synthetic_transport"
     }
   ],
   "consumer_outputs": {
@@ -88,11 +165,11 @@
     "interpretation": "A matching hash proves byte preservation for this fixture and consumer; it says nothing about speech, vision or language quality."
   },
   "route_contract": {
-    "plain": "transport the original bytes through the bounded two-stage path",
-    "coded": "transport coded ranges, decode and place into a plaintext buffer",
-    "http_range": "exercise range reads when the source advertises and honors them",
-    "http_no_range": "exercise the existing fallback when the source returns a full response",
-    "sealed": "exercise local authenticated private distribution only when the existing crypto backend is available"
+    "plain": {"description": "transport the original bytes through the bounded two-stage path", "availability_policy": "always", "compatibility": "transport-only; no real consumer", "evidence_class": "synthetic_transport"},
+    "coded": {"description": "transport coded ranges, decode and place into a plaintext buffer", "availability_policy": "stdlib-coded conditional; lmz-coded optional", "compatibility": "transport-only; no real consumer", "evidence_class": "synthetic_transport"},
+    "http_range": {"description": "exercise range reads when the source advertises and honors them", "availability_policy": "local loopback fixture", "compatibility": "transport-only; no WAN claim", "evidence_class": "simulated_constraint"},
+    "http_no_range": {"description": "exercise the existing fallback when the source returns a full response", "availability_policy": "local loopback fixture", "compatibility": "transport-only; no WAN claim", "evidence_class": "simulated_constraint"},
+    "sealed": {"description": "exercise local authenticated private distribution only when the existing crypto backend is available", "availability_policy": "optional existing crypto backend", "compatibility": "transport/integrity-only; no policy or customer claim", "evidence_class": "optional_backend"}
   },
   "measurement_rules": {
     "cache": "Use cache=off for loader arms; report whether a host cold read was actually controllable.",

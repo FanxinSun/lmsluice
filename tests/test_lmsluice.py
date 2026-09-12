@@ -1381,6 +1381,23 @@ class TestCache(unittest.TestCase):
         self.assertIsNone(cache.find(self.plain),
                           "a changed file must miss, never serve stale bytes")
 
+    def test_same_stat_rewrite_misses_rather_than_serving_stale_weights(self):
+        """A restored mtime must not make an in-place rewrite a cache hit."""
+        from lmsluice import cache
+
+        entry = cache.build(self.plain, codec="zstd")
+        before = os.stat(self.plain)
+        before_key = cache.key_for(self.plain)
+        with open(self.plain, "r+b") as fh:
+            fh.seek(8)
+            original = fh.read(1)
+            fh.seek(8)
+            fh.write(bytes([original[0] ^ 0x01]))
+        os.utime(self.plain, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(cache.key_for(self.plain), before_key)
+        self.assertIsNone(cache.find(self.plain),
+                          "a same-size, same-mtime rewrite must miss the old entry")
+
 
 class TestBoundary(unittest.TestCase):
     """The division in `docs/boundary.md`, enforced rather than described.

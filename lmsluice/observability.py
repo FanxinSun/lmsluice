@@ -97,7 +97,8 @@ class ReadinessRecord:
 
     def __init__(self, *, run_id: str | None = None, metadata: dict | None = None,
                  sample_interval: float = 0.05, max_samples: int = 512,
-                 device_probe=None):
+                 device_probe=None, sample_resources: bool = True,
+                 provenance: dict | None = None):
         self.run_id = run_id or uuid.uuid4().hex
         self._origin_ns = time.monotonic_ns()
         self._started_utc = _datetime.datetime.now(
@@ -144,6 +145,7 @@ class ReadinessRecord:
         }
         self.failure = None
         self.metadata = _json_value(metadata or {})
+        self.provenance = _json_value(provenance or {})
         self.platform = {
             "system": platform.system(),
             "release": platform.release(),
@@ -153,7 +155,7 @@ class ReadinessRecord:
         }
         self._sampler = ResourceSampler(
             self, interval=sample_interval, max_samples=max_samples,
-            device_probe=device_probe)
+            device_probe=device_probe, enabled=sample_resources)
         self._started = False
         self._finished = False
 
@@ -217,6 +219,13 @@ class ReadinessRecord:
             for key, value in values.items():
                 if key in self.execution:
                     self.execution[key] = _json_value(value)
+
+    def set_provenance(self, **values) -> None:
+        """Attach immutable campaign identity without changing the load path."""
+        with self._lock:
+            current = dict(self.provenance) if isinstance(self.provenance, dict) else {}
+            current.update(_json_value(values))
+            self.provenance = current
 
     def add_coverage(self, **values: int) -> None:
         with self._lock:
@@ -294,6 +303,7 @@ class ReadinessRecord:
                 "resources": self._sampler.to_dict(),
                 "failure": _json_value(self.failure),
                 "metadata": _json_value(self.metadata),
+                "provenance": _json_value(self.provenance),
             }
             if hasattr(self, "_transport"):
                 out["transport"] = _json_value(self._transport)
@@ -324,11 +334,12 @@ class ResourceSampler:
     """Bounded current-process RSS/PSS sampler used by ``ReadinessRecord``."""
 
     def __init__(self, record: ReadinessRecord, *, interval: float,
-                 max_samples: int, device_probe=None):
+                 max_samples: int, device_probe=None, enabled: bool = True):
         self.record = record
         self.interval = max(0.001, float(interval))
         self.max_samples = max(1, int(max_samples))
         self.device_probe = device_probe
+        self.enabled = bool(enabled)
         self._stop = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
@@ -339,6 +350,8 @@ class ResourceSampler:
         self._device = {"status": UNMEASURED, "reason": "no probe supplied"}
 
     def start(self) -> None:
+        if not self.enabled:
+            return
         with self._lock:
             if self._thread is not None:
                 return
@@ -348,6 +361,8 @@ class ResourceSampler:
             self._thread.start()
 
     def stop(self) -> None:
+        if not self.enabled:
+            return
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -387,6 +402,28 @@ class ResourceSampler:
 
     def to_dict(self) -> dict:
         with self._lock:
+            if not self.enabled:
+                return {
+                    "sampling": {
+                        "status": "DISABLED",
+                        "interval_s": self.interval,
+                        "max_samples": self.max_samples,
+                        "samples": 0,
+                        "scope": "current_process",
+                        "child_accounting": "excluded; shared pages not summed",
+                        "coverage": "disabled_by_caller",
+                    },
+                    "host": {"baseline": {}, "peak": {}, "last": {}},
+                    "allocator": {
+                        "status": UNMEASURED,
+                        "reason": "no allocator-specific hook supplied",
+                    },
+                    "device": {"status": UNMEASURED, "reason": "sampling disabled"},
+                    "energy": {
+                        "status": UNMEASURED,
+                        "reason": "no reliable energy sensor supplied",
+                    },
+                }
             baseline = self._baseline or {}
             peak = self._peak or {}
             return {

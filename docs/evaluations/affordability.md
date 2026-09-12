@@ -3,8 +3,17 @@
 This is an engineering affordability evaluation for the frozen synthetic
 workload. It does not price a product. The run compares a normal mmap loader,
 lmsluice plain transport and the stdlib-coded route on the executor's WSL2
-host. The complete raw evidence is retained in the run directory reported by
-the probe; the compact campaign row is `A1-summary` in `results.jsonl`.
+host. The current correction campaign is identified by the exact
+`source_commit` in `manifest.json` and the export-substituted marker in
+[`final-evidence.json`](final-evidence.json). Its complete raw evidence is
+retained in the run directory and deterministic archive reported by the probe;
+the compact campaign row is `A1-summary` in `results.jsonl`. The required
+complete return is
+`/home/rog/.codex/handover/2026-09-13-lmsluice-device-response-acceptance-corrections.REPORT.md`.
+
+The measurements below are the dated initial campaign sample retained for
+context. They are superseded by the correction campaign's five-sample arm
+summaries, 30-sample tail and raw rows. They do not identify a product price.
 
 The reference clean tracked-export campaign
 (`/tmp/lmsluice-device-readiness.WKXRxT`) used 30 interleaved first-fetch and
@@ -35,11 +44,13 @@ were collected per process. Allocator, device and energy costs were not
 measured. CUDA was detectable through lmsluice, but torch was absent, so the
 CUDA alignment case was `NOT_RUN`.
 
-The first-fetch cache operation was attempted locally, but WSL2 lower-cache
-state is not fully observable. The campaign records that limitation in each
-row instead of calling the result a verified cold-storage measurement. No
-portable device, power envelope, memory price, storage price, production
-volume, host fleet, customer, or BOM data was supplied. Consequently A1 is
+The correction campaign attempts cache control on the actual source path for
+each arm and records `cold_attempt` or `warm_or_layered` per sample. WSL2
+lower-cache state is not fully observable, so no row is treated as a verified
+cold-storage measurement. It also retains an optional `lmz-coded` arm when the
+configured interpreter can import lmz, or an explicit per-arm `NOT_RUN` row
+otherwise. No portable device, power envelope, memory price, storage price,
+production volume, host fleet, customer, or BOM data was supplied. Consequently A1 is
 `INCONCLUSIVE` for affordability and resource feasibility. It supports a
 bounded technical statement: the current core can preserve bytes and expose
 startup/resource evidence under the campaign limits. It cannot support a

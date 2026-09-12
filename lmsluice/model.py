@@ -258,6 +258,8 @@ class Model:
                  else self.span_of(selected))
         _observe(observer, "mark", "allocation", bytes=self.plain_bytes,
                  provided_buffer=into is not None, destination="host")
+        _observe(observer, "mark", "staging", bytes=self.plain_bytes,
+                 destination="host", mode="full-load")
         _observe(observer, "add_coverage", requested_spans=len(spans),
                  requested_bytes=sum(max(0, hi - lo) for lo, hi in spans))
         buf = into if into is not None else destination(self.plain_bytes)

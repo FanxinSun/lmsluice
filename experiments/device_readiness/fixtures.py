@@ -84,7 +84,9 @@ def write_safetensors(path: str, entries: list[dict], *, seed: int = 7) -> dict:
         "tensor_count": len(entries),
         "tensors": [
             {"name": e["name"], "role": e["role"], "dtype": e["dtype"],
-             "shape": list(e["shape"]), "bytes": len(e["bytes"])}
+             "shape": list(e["shape"]), "bytes": len(e["bytes"]),
+             "input_sha256": hashlib.sha256(e["bytes"]).hexdigest(),
+             "consumer_payload_sha256": hashlib.sha256(e["bytes"]).hexdigest()}
             for e in entries
         ],
     }

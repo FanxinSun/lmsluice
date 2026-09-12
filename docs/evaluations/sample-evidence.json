@@ -1,6 +1,7 @@
 {
   "schema": 1,
-  "evidence_kind": "compact final campaign sample",
+  "status": "historical initial campaign sample; superseded by final-evidence.json and the correction report",
+  "evidence_kind": "dated compact initial campaign sample",
   "run": {
     "path": "/tmp/lmsluice-device-readiness.WKXRxT",
     "tracked_export_commit": "38b8109a53b084ada6ee004193c68cd39e2479aa",

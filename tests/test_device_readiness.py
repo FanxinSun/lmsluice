@@ -85,6 +85,23 @@ class TestDeviceReadiness(unittest.TestCase):
             [],
         )
 
+    def test_observer_can_account_for_events_without_resource_sampling(self):
+        record = ReadinessRecord(
+            metadata={"case": "observer-no-resource-sampling"},
+            sample_resources=False,
+        ).start()
+        placed = bytearray()
+        report = transport(
+            [(0, 4)], lambda job: b"data",
+            lambda _job, payload: placed.extend(payload) or len(payload),
+            fetch_threads=1, place_threads=1, observer=record,
+        )
+        data = record.finish(report)
+        self.assertEqual(bytes(placed), b"data")
+        self.assertIsNotNone(data["events"]["transfer_complete"])
+        self.assertEqual(data["resources"]["sampling"]["status"], "DISABLED")
+        self.assertEqual(data["resources"]["sampling"]["samples"], 0)
+
     def test_model_observer_preserves_plain_and_coded_consumer_bytes(self):
         with tempfile.TemporaryDirectory(prefix="lmsluice-readiness-test-") as directory:
             bundle = generate_bundle(directory)

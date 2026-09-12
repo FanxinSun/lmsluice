@@ -1,0 +1,2 @@
+experiments/device_readiness/buildinfo.py export-subst
+docs/evaluations/final-evidence.json export-subst

@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "status": "tracked final-run index",
+  "branch": "codex/portable-device-readiness",
+  "source_commit": "$Format:%H$",
+  "source_commit_resolution": "Git archive export-subst expands source_commit to the exact published commit; a normal checkout resolves it with git rev-parse in manifest.json and every readiness record.",
+  "probe": "scripts/probe-device-readiness.sh",
+  "launch_contract": "One no-argument /bin/bash launch from any working directory",
+  "contract": {
+    "workload": "docs/evaluations/workload.json",
+    "schema": 2,
+    "fixture_version": "portable-device-readiness-fixture-v1",
+    "plain_sha256": "067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c",
+    "plain_bytes": 145012,
+    "real_audio_image_prompt_application_fixtures": "UNAVAILABLE"
+  },
+  "required_engineering_cases": [
+    "contract",
+    "observability-success",
+    "observability-failure",
+    "observability-event-order",
+    "observability-overhead-no-sampling",
+    "observability-overhead-sampled",
+    "bandwidth-plain",
+    "bandwidth-coded",
+    "memory-window",
+    "memory-oversized-tensor",
+    "memory-noncontiguous",
+    "fault-source-reset",
+    "fault-truncated-range",
+    "fault-corrupt-coded",
+    "fault-destination-bounds",
+    "consumer-departure",
+    "application-restart",
+    "multipart-failure-detection",
+    "cache-workflow"
+  ],
+  "retained_outputs": [
+    "summary.json",
+    "results.jsonl",
+    "manifest.json",
+    "full-regression.log",
+    "full-regression.attempt*.log",
+    "records/*.json",
+    "errors/*",
+    "affordability.json",
+    "niche.json",
+    "restarts/*.stdout",
+    "restarts/*.stderr",
+    "cache-workflow/*",
+    "probe.log",
+    "evidence.zip"
+  ],
+  "interpretation": {
+    "engineering": "PASS requires required_failures to be empty; induced failures remain FAIL evidence with separate detection rows",
+    "lmz": "run only when importable in the configured interpreter; otherwise retain per-arm NOT_RUN with reason",
+    "affordability": "INCONCLUSIVE without approved target BOM, power, thermal, cost and host/customer inputs",
+    "specialized_deployment": "INCONCLUSIVE without a named target workflow and customer evidence",
+    "real_target": "UNAVAILABLE; local fixtures, loopback services and bounded simulated links are proxy evidence"
+  },
+  "report": "/home/rog/.codex/handover/2026-09-13-lmsluice-device-response-acceptance-corrections.REPORT.md"
+}

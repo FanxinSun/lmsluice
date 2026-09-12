@@ -30,8 +30,9 @@ people:
   disk until someone removes it. A tool that tidies a model directory on the
   user's behalf will eventually delete the wrong thing.
 - **A cache entry is bound to the file that produced it** -- path, size and
-  modification time -- so an edited checkpoint silently misses rather than
-  silently serving stale weights.
+  modification time select the candidate, and the sidecar's source digest
+  validates its contents -- so an edited checkpoint silently misses rather
+  than silently serving stale weights.
 """
 
 from __future__ import annotations
@@ -73,6 +74,17 @@ def key_for(path: str) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 
+def _source_sha256(path: str) -> str:
+    """Hash a source only when a candidate cache entry needs validation."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(1 << 20)
+            if not block:
+                return digest.hexdigest()
+            digest.update(block)
+
+
 def entry_for(path: str) -> str:
     return os.path.join(models_dir(), f"{key_for(path)}.lmsl")
 
@@ -83,7 +95,21 @@ def find(path: str) -> str | None:
         got = entry_for(path)
     except OSError:
         return None
-    return got if os.path.exists(got) else None
+    if not os.path.exists(got):
+        return None
+    # Path, size and nanosecond mtime are a cheap first key, but a caller can
+    # restore an mtime after an in-place rewrite.  A cache hit must never then
+    # serve bytes made from the old contents.  Older sidecars have no digest,
+    # so they are conservatively treated as misses and rebuilt on request.
+    try:
+        with open(got + ".json", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        recorded = meta.get("source_sha256")
+        if not recorded or recorded != _source_sha256(path):
+            return None
+    except (OSError, ValueError):
+        return None
+    return got
 
 
 @dataclass(frozen=True)
@@ -258,7 +284,8 @@ def _note(dst: str, src: str, codec: str) -> None:
     """A sidecar saying what this entry is, so a cache directory is readable."""
     meta = {"source": os.path.abspath(src), "codec": codec,
             "plain_bytes": os.path.getsize(src),
-            "coded_bytes": os.path.getsize(dst), "built_at": time.time()}
+            "coded_bytes": os.path.getsize(dst),
+            "source_sha256": _source_sha256(src), "built_at": time.time()}
     with open(f"{dst}.json", "w") as fh:
         json.dump(meta, fh, indent=1)
 
