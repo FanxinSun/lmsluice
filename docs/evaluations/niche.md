@@ -1,8 +1,10 @@
 # SLUICE-B1 specialized deployment evaluation
 
 B1 is independent of the affordability evaluation. It compares deployment
-workflows and records technical, integration and evidence limits. The final
-campaign used the frozen workload and checked consumer output hashes against
+workflows and records technical, integration and evidence limits. The
+reference clean tracked-export campaign
+(`/tmp/lmsluice-device-readiness.WKXRxT`) used the frozen workload and checked
+consumer output hashes against
 the plain artifact hash. The rows and per-request readiness records are in the
 run directory retained by the probe.
 

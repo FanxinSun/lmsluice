@@ -6,14 +6,16 @@ lmsluice plain transport and the stdlib-coded route on the executor's WSL2
 host. The complete raw evidence is retained in the run directory reported by
 the probe; the compact campaign row is `A1-summary` in `results.jsonl`.
 
-The final local campaign used 30 interleaved first-fetch and warm-reuse
+The reference clean tracked-export campaign
+(`/tmp/lmsluice-device-readiness.WKXRxT`) used 30 interleaved first-fetch and
+warm-reuse
 samples: five repetitions for each of three arms in each scenario. It also
 ran a 30-repetition warm local tail for the normal loader and lmsluice plain
 arms, plus synthetic scheduler interference and a resident control. Every
 successful arm reproduced the frozen full-file SHA-256
 `067ffed1b1199b4b01fb53c78ec66e10a2d70ed9471a280e84984d26e8aaa61c`.
 
-Observed medians from the final WSL2 run were:
+Observed medians from that reference WSL2 run were:
 
 | scenario | normal loader | lmsluice plain | stdlib-coded |
 |---|---:|---:|---:|
@@ -26,7 +28,7 @@ median/p95 were 0.001697/0.001917 s. Plain transport beat the normal loader in
 two paired samples and coded transport in one of the ten comparisons. These are small local synthetic timings,
 not a claim that lmsluice is slower or faster on a target device.
 
-The clean tracked-export run had 16 logical CPUs, about 16.8 GiB available memory
+That clean tracked-export run had 16 logical CPUs, about 16.8 GiB available memory
 at setup and about 12.2 GB free disk. The fixture was 145,012 bytes; the process plan stayed far
 below the 1 GiB working-set and 2 GiB run-storage limits. Host memory samples
 were collected per process. Allocator, device and energy costs were not
