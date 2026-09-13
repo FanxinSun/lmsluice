@@ -4,6 +4,24 @@
 
 set -u
 
+lmz_root=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --lmz-root)
+            if [ "$#" -lt 2 ]; then
+                printf '%s\n' "FAIL: --lmz-root requires a directory" >&2
+                exit 2
+            fi
+            lmz_root="$2"
+            shift 2
+            ;;
+        *)
+            printf 'FAIL: unknown probe argument: %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+done
+
 script_dir="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
 output_root="${LMSLUICE_MM_SLUICE_OUT:-${TMPDIR:-/tmp}}"
@@ -16,6 +34,16 @@ fi
 if [ ! -d "$output_root" ] && ! mkdir -p "$output_root"; then
     printf '%s\n' "FAIL: cannot create output root: $output_root" >&2
     exit 2
+fi
+
+if [ -n "$lmz_root" ] && [ ! -d "$lmz_root" ]; then
+    printf 'FAIL: lmz root is not a directory: %s\n' "$lmz_root" >&2
+    exit 2
+fi
+
+python_path="$repo_root"
+if [ -n "$lmz_root" ]; then
+    python_path="$repo_root:$lmz_root"
 fi
 
 run_dir="$(mktemp -d "$output_root/lmsluice-mm-sluice-01.XXXXXX")"
@@ -48,7 +76,7 @@ done
 if [ "$preflight_status" -eq 0 ]; then
     (
         cd "$repo_root" || exit 2
-        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$python_path" \
             python3 -c 'import experiments.mm_sluice.fixtures, experiments.mm_sluice.harness, lmsluice.bundle, lmsluice.onnxruntime_adapter' \
             >> "$log_path" 2>&1
     ) || preflight_status=$?
@@ -56,11 +84,16 @@ fi
 
 campaign_status=0
 if [ "$preflight_status" -eq 0 ]; then
+    harness_args=(--out "$run_dir" --repo-root "$repo_root")
+    if [ -n "$lmz_root" ]; then
+        harness_args+=(--lmz-root "$lmz_root")
+    fi
     (
         cd "$repo_root" || exit 2
-        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+        PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="$python_path" \
             python3 -m experiments.mm_sluice.harness \
-            --out "$run_dir" --repo-root "$repo_root"
+            "${harness_args[@]}"
     ) >"$log_path" 2>&1
     campaign_status=$?
 else
@@ -73,7 +106,7 @@ archive_status=0
 if [ -f "$repo_root/experiments/device_readiness/archive.py" ]; then
     (
         cd "$repo_root" || exit 2
-        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$python_path" \
             python3 -m experiments.device_readiness.archive \
             --run-dir "$run_dir" --archive "$archive_path"
     ) >>"$log_path" 2>&1
@@ -87,7 +120,7 @@ archive_verify_status=0
 if [ "$archive_status" -eq 0 ] && [ -f "$archive_path" ]; then
     (
         cd "$repo_root" || exit 2
-        PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$python_path" \
             python3 -m experiments.device_readiness.archive \
             --run-dir "$run_dir" --archive "$archive_path" --verify
     ) >>"$log_path" 2>&1
@@ -140,6 +173,7 @@ fi
 
 {
     printf 'repository=%s\n' "$repo_root"
+    printf 'lmz_root=%s\n' "$lmz_root"
     printf 'run_directory=%s\n' "$run_dir"
     printf 'preflight_exit=%s\n' "$preflight_status"
     printf 'campaign_exit=%s\n' "$campaign_status"

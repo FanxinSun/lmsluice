@@ -233,22 +233,30 @@ def generate_bundle(directory: str, *, seed: int = SEED) -> dict:
         {"path": "vocabulary.txt", "role": "vocabulary"},
         {"path": "calibration.json", "role": "calibration"},
         {"path": "backend/incompressible.bin", "role": "opaque",
-         "consumer": {"engine": "onnxruntime", "backend": "CPUExecutionProvider"}},
+         "consumer": {"engine": "onnxruntime", "backend": "CPUExecutionProvider",
+                      "version_range": ">=1.16,<2", "required_operators": [],
+                      "extensions": []}},
     ]
     manifest = make_manifest(
-        root, entries, schema="1.0", entry_point="model.onnx",
+        root, entries, schema={"major": 1, "minor": 0}, entry_point="model.onnx",
         consumer={
             "engine": "onnxruntime",
             "backend": "CPUExecutionProvider",
             "version_range": ">=1.16,<2",
-            "operators": ["Add"],
+            "required_operators": ["Add"],
             "extensions": [],
             "code_loading": "disabled",
+            "export_provenance": "synthetic_generated",
         },
         resources={
-            "decode_workspace_bytes": {"value": 4096, "method": "declared", "status": "ESTIMATED"},
+            "decode_workspace": {"bytes": 4096, "measurement": "estimated",
+                                  "method": "fixture declaration"},
             "materialized_bytes": {"value": 0, "method": "measured_after_validation", "status": "MEASURED"},
         },
+        id="mm-sluice-01-complete-bundle",
+        version="1.0.0",
+        source={"revision": "local-generated", "uri": "fixture://mm-sluice-01"},
+        license={"classification": "generated", "redistribution": "allowed"},
         provenance={
             "kind": "synthetic_generated",
             "fixture_version": FIXTURE_VERSION,
@@ -260,19 +268,23 @@ def generate_bundle(directory: str, *, seed: int = SEED) -> dict:
             "inputs": [{"name": "input", "dtype": "float32", "shape": [1]}],
             "outputs": [{"name": "output", "dtype": "float32", "shape": [1]}],
         },
-        preprocessing={
-            "audio": {"status": "schema_example", "sample_rate_hz": 16000},
-            "visual": {"status": "schema_example", "layout": "NCHW", "color": "RGB"},
+        preprocess={
+            "identity": "synthetic-multimodal-preprocess",
+            "parameters": {
+                "audio": {"status": "schema_example", "sample_rate_hz": 16000},
+                "visual": {"status": "schema_example", "layout": "NCHW", "color": "RGB"},
+            },
         },
-        state={
+        temporal_state={
             "inputs": [], "outputs": [], "initialization": "zero",
-            "reset_on": ["cancellation", "model_change", "discontinuity"],
-            "cadence": "caller_defined", "max_bytes": 0,
+            "reset": "on cancellation, model change or discontinuity",
+            "cadence": "caller_defined", "discontinuity": "reset",
+            "max_state_bytes": 0,
         },
         evaluation={
-            "input": {"kind": "synthetic", "x": 2.0, "sha256": hashlib.sha256(struct.pack("<f", 2.0)).hexdigest()},
-            "expected_output": {"kind": "synthetic", "value": 3.0,
-                                "tolerance": 0.0, "quality": "UNAVAILABLE"},
+            "input_identity": hashlib.sha256(struct.pack("<f", 2.0)).hexdigest(),
+            "expected_output_identity": hashlib.sha256(struct.pack("<f", 3.0)).hexdigest(),
+            "metric": "exact", "tolerance": 0.0, "quality": "UNAVAILABLE",
         },
     )
     manifest_path = write_manifest(os.path.join(root, "bundle.json"), manifest)

@@ -45,8 +45,21 @@ class TestBundle(unittest.TestCase):
         )
         graph = next(entry for entry in descriptor.entries if entry.path == "model.onnx")
         self.assertEqual(graph.dependencies[0].path, "weights.bin")
+        self.assertEqual(graph.dependencies[0].entry_id,
+                         next(entry.entry_id for entry in descriptor.entries
+                              if entry.path == "weights.bin"))
         self.assertEqual(graph.dependencies[0].offset, 3)
         self.assertEqual(graph.dependencies[0].length, 4)
+        self.assertEqual(descriptor.entry_point_details,
+                         {"path": "model.onnx", "kind": "graph"})
+        self.assertEqual(descriptor.consumer["required_operators"], ["Add"])
+        with open(self.fixture["manifest_path"], encoding="utf-8") as fh:
+            direct_payload = json.load(fh)["bundle"]
+        direct = B.resolve_bundle({"source_root": self.fixture["source_root"],
+                                   "manifest": direct_payload})
+        self.assertEqual(direct.identity, descriptor.identity)
+        self.assertEqual(direct.entry_point_details, descriptor.entry_point_details)
+        self.assertEqual(direct.consumer, descriptor.consumer)
         report = B.validate_bundle(
             self.fixture["source_root"],
             expected_manifest_sha256=descriptor.identity,
@@ -60,6 +73,8 @@ class TestBundle(unittest.TestCase):
         self.assertEqual(result.manifest_sha256, descriptor.identity)
         self.assertEqual(result.materialized_bytes, self.fixture["total_bytes"])
         self.assertEqual(result.entry_point, "model.onnx")
+        self.assertEqual(result.entry_point_details,
+                         {"path": "model.onnx", "kind": "graph"})
         self.assertEqual(result.consumer["backend"], "CPUExecutionProvider")
         for entry in descriptor.entries:
             left = os.path.join(self.fixture["source_root"], entry.path)
@@ -147,19 +162,71 @@ class TestBundle(unittest.TestCase):
             self.assertEqual(fh.read(), b"caller-owned")
         shutil.rmtree(destination)
 
-        original_publish = B._atomic_publish_no_replace
+        original_publish = B._atomic_publish_fd_no_replace
 
-        def appears(stage, parent, name):
-            os.mkdir(os.path.join(parent, name))
-            return original_publish(stage, parent, name)
+        def appears(parent_fd, stage_name, name, destination):
+            os.mkdir(name, dir_fd=parent_fd)
+            return original_publish(parent_fd, stage_name, name, destination)
 
-        with mock.patch.object(B, "_atomic_publish_no_replace", appears):
+        with mock.patch.object(B, "_atomic_publish_fd_no_replace", appears):
             with self.assertRaises(B.BundleError) as context:
                 B.materialize_bundle(self.fixture["source_root"], destination)
         self.assertEqual(context.exception.code, "destination_exists")
         self.assertTrue(os.path.isdir(destination))
         self.assertEqual([name for name in os.listdir(destination)], [])
         self.assertEqual([name for name in os.listdir(self.directory)
+                          if name.startswith(".lmsluice-bundle-")], [])
+
+        real_parent = os.path.join(self.directory, "real-destination-parent")
+        os.mkdir(real_parent)
+        linked_parent = os.path.join(self.directory, "linked-destination-parent")
+        os.symlink(real_parent, linked_parent)
+        with self.assertRaises(B.BundleError) as context:
+            B.materialize_bundle(self.fixture["source_root"],
+                                 os.path.join(linked_parent, "out"))
+        self.assertEqual(context.exception.code, "unsafe_destination")
+        self.assertEqual(os.listdir(real_parent), [])
+
+        race_parent = os.path.join(self.directory, "race-parent")
+        race_replacement = os.path.join(self.directory, "race-replacement")
+        race_old = race_parent + ".old"
+        os.mkdir(race_parent)
+        os.mkdir(race_replacement)
+        original_stage = B._create_owned_stage
+
+        def replace_before_stage(parent_fd):
+            os.rename(race_parent, race_old)
+            os.rename(race_replacement, race_parent)
+            return original_stage(parent_fd)
+
+        with mock.patch.object(B, "_create_owned_stage", replace_before_stage):
+            with self.assertRaises(B.BundleError) as context:
+                B.materialize_bundle(self.fixture["source_root"],
+                                     os.path.join(race_parent, "out"))
+        self.assertEqual(context.exception.code, "destination_parent_changed")
+        self.assertEqual(os.listdir(race_parent), [])
+        self.assertEqual([name for name in os.listdir(race_old)
+                          if name.startswith(".lmsluice-bundle-")], [])
+
+        cleanup_parent = os.path.join(self.directory, "cleanup-parent")
+        cleanup_replacement = os.path.join(self.directory, "cleanup-replacement")
+        cleanup_old = cleanup_parent + ".old"
+        os.mkdir(cleanup_parent)
+        os.mkdir(cleanup_replacement)
+
+        def replace_during_cleanup(parent_fd, stage_name, name, target):
+            os.rename(cleanup_parent, cleanup_old)
+            os.rename(cleanup_replacement, cleanup_parent)
+            raise B.BundleError("injected publish failure", code="injected_publish")
+
+        with mock.patch.object(B, "_atomic_publish_fd_no_replace",
+                               replace_during_cleanup):
+            with self.assertRaises(B.BundleError) as context:
+                B.materialize_bundle(self.fixture["source_root"],
+                                     os.path.join(cleanup_parent, "out"))
+        self.assertEqual(context.exception.code, "injected_publish")
+        self.assertEqual(os.listdir(cleanup_parent), [])
+        self.assertEqual([name for name in os.listdir(cleanup_old)
                           if name.startswith(".lmsluice-bundle-")], [])
 
     @unittest.skipUnless(os.name == "posix", "POSIX special-file safety fixture")

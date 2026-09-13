@@ -25,6 +25,37 @@ Consumers check the complete file or exact selected tensor payloads. Hash
 agreement proves preservation of this fixture; it is not a model-quality or
 voice-quality score.
 
+For MM-SLUICE-01 the canonical bundle payload uses schema `{"major": 1,
+"minor": 0}`, bundle `id`/`version`, `source` and `license`, an entry-point
+object, `consumer.required_operators` and `extensions`, `preprocess`,
+`temporal_state`, `resources` and `evaluation`. Entries carry stable ids,
+decoded and stored measurements, SHA-256 digests and dependency ids, paths and
+ranges. The plain directory format retains its top-level `bundle` envelope for
+compatibility; the optional lmz adapter removes that envelope and translates
+legacy aliases before calling lmz's public bundle API. It snapshots only the
+declared files, so a source `bundle.json` is never forwarded as an archive
+artifact.
+
+The lmz route returns the same normalized lmsluice result shape as the plain
+route and retains the supplied observer. Archive decoded, stored and
+materialized accounting is reported only when lmz provides it. lmz does not
+provide a cooperative in-call cancellation hook, so cancellation is checked
+before and after each public inventory, validation, creation or materialization
+call; no backend preemption is claimed and transferred bytes remain unavailable
+rather than being inferred from archive size. Materialization must match the
+strict pre-call inventory entry set, identities and digests before lmsluice
+stages or publishes it. The default probe does not import the sibling lmz
+checkout. A separate run may pass `--lmz-root` for read-only interoperability
+evidence against the accepted clean `main` commit.
+
+Plain and lmz publication stage through a directory descriptor opened with
+no-follow path components. The descriptor remains held through no-replace
+publication and ownership-based cleanup; a destination-parent symlink or
+replacement causes a structured failure without following or deleting the
+replacement. This safety evidence is bounded to POSIX systems with the
+required descriptor and `renameat2` primitives; unsupported platforms fail
+closed.
+
 The coded archive is generated from the same plaintext. Its measured codec
 metadata makes the archive container hash run dependent, so the campaign
 records its bytes and hash as evidence without freezing that incidental value.

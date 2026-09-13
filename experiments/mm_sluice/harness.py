@@ -33,6 +33,9 @@ from lmsluice import onnxruntime_adapter as ORT
 from lmsluice.onnxruntime_adapter import OnnxCPUConsumer
 
 
+EXPECTED_LMZ_COMMIT = "2d7517e682a8b0a37fb30fce45d81e4effc210d3"
+
+
 def _utc_now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -480,14 +483,62 @@ def run_failures(campaign, bundle):
         B.materialize_bundle(bundle["source_root"], destination, observer=record)
 
     def destination_race(record, destination):
-        original = B._atomic_publish_no_replace
+        original = B._atomic_publish_fd_no_replace
 
-        def appears(stage, parent, name):
-            os.mkdir(os.path.join(parent, name))
-            return original(stage, parent, name)
+        def appears(parent_fd, stage_name, name, target):
+            os.mkdir(name, dir_fd=parent_fd)
+            return original(parent_fd, stage_name, name, target)
 
-        with mock.patch.object(B, "_atomic_publish_no_replace", appears):
+        with mock.patch.object(B, "_atomic_publish_fd_no_replace", appears):
             B.materialize_bundle(bundle["source_root"], destination, observer=record)
+
+    def destination_parent_symlink(record, destination):
+        parent = os.path.join(campaign.out, "parent-safety", "real")
+        linked = os.path.join(campaign.out, "parent-safety", "linked")
+        os.makedirs(parent, exist_ok=True)
+        os.symlink(parent, linked)
+        record.set_provenance(destination_parent=linked, external_parent=parent,
+                              safety_check="symlink_rejected")
+        B.materialize_bundle(bundle["source_root"], os.path.join(linked, "out"),
+                             observer=record)
+
+    def destination_parent_replacement_before_publish(record, destination):
+        parent = os.path.join(campaign.out, "parent-safety", "before")
+        replacement = parent + ".replacement"
+        old = parent + ".old"
+        os.makedirs(parent, exist_ok=True)
+        os.makedirs(replacement, exist_ok=True)
+        original_stage = B._create_owned_stage
+
+        def replace_before_stage(parent_fd):
+            os.rename(parent, old)
+            os.rename(replacement, parent)
+            return original_stage(parent_fd)
+
+        record.set_provenance(destination_parent=parent, replacement=parent,
+                              original_parent=old, safety_check="fd_anchor")
+        with mock.patch.object(B, "_create_owned_stage", replace_before_stage):
+            B.materialize_bundle(bundle["source_root"], os.path.join(parent, "out"),
+                                 observer=record)
+
+    def destination_parent_replacement_during_cleanup(record, destination):
+        parent = os.path.join(campaign.out, "parent-safety", "cleanup")
+        replacement = parent + ".replacement"
+        old = parent + ".old"
+        os.makedirs(parent, exist_ok=True)
+        os.makedirs(replacement, exist_ok=True)
+
+        def replace_during_cleanup(parent_fd, stage_name, name, target):
+            os.rename(parent, old)
+            os.rename(replacement, parent)
+            raise B.BundleError("injected publish failure", code="injected_publish")
+
+        record.set_provenance(destination_parent=parent, replacement=parent,
+                              original_parent=old, safety_check="fd_owned_cleanup")
+        with mock.patch.object(B, "_atomic_publish_fd_no_replace",
+                               replace_during_cleanup):
+            B.materialize_bundle(bundle["source_root"], os.path.join(parent, "out"),
+                                 observer=record)
 
     def source_race(record, destination):
         root = _clone_fixture(bundle, _negative_source(campaign, "source-race"))
@@ -529,6 +580,9 @@ def run_failures(campaign, bundle):
             ("symlink-source", symlink_source), ("special-source", special_source),
             ("pre-existing-destination", destination_existing),
             ("destination-appearance-race", destination_race),
+            ("destination-parent-symlink", destination_parent_symlink),
+            ("destination-parent-replacement", destination_parent_replacement_before_publish),
+            ("destination-parent-cleanup-race", destination_parent_replacement_during_cleanup),
             ("source-mutation-race", source_race), ("source-interruption", interrupted),
             ("allocation-ceiling", ceiling), ("cancellation-boundary", cancelled),
             ("incompatible-provider", incompatible_provider)):
@@ -735,33 +789,233 @@ def run_optional_ort(campaign, bundle, materialized):
                  input_contract=bundle["input"], provider="CPUExecutionProvider")
 
 
-def run_optional_lmz(campaign, bundle):
+def _git_snapshot(path):
+    if not path:
+        return None
+    return {
+        "path": os.path.abspath(path),
+        "head": _git_value(path, "rev-parse", "HEAD"),
+        "branch": _git_value(path, "branch", "--show-current"),
+        "status": _git_value(path, "status", "--porcelain=v1"),
+    }
+
+
+def _record_lmz_negative(campaign, provider, archive, name, action):
+    record = _new_record(f"lmz-{name}")
+    destination = os.path.join(campaign.out, "lmz-negative", name)
+    error = None
+    try:
+        action(record, destination)
+    except BaseException as exc:
+        error = exc
+    finally:
+        if error is not None and record.failure is None:
+            record.failure_event(error, phase=f"lmz-{name}")
+        path, data = campaign.record(record)
+    campaign.row(f"lmz-{name}", "FAIL" if error else "PASS", required=False,
+                 expected_failure=True, evidence_class="optional_backend",
+                 provider="lmz", record=path, error=_error(error),
+                 terminal_failure=data.get("events", {}).get("terminal_failure"),
+                 cleanup=data.get("execution", {}).get("cleanup"))
+    campaign.row(f"lmz-{name}-detection", "PASS" if error else "FAIL",
+                 required=True, evidence_class="optional_backend",
+                 expected_failure_detection=True, provider="lmz",
+                 error_code=getattr(error, "code", type(error).__name__ if error else None),
+                 boundary=(getattr(error, "details", {}) or {}).get("boundary"),
+                 no_false_ready=data.get("events", {}).get("consumer_ready") is None,
+                 release_recorded=data.get("events", {}).get("release") is not None,
+                 record=path)
+
+
+def run_optional_lmz(campaign, bundle, *, lmz_root=None):
     cap = B.LmzBundleProvider().capability()
-    if not cap.get("available"):
+    if lmz_root is None:
         campaign.row("lmz-complete-bundle", "NOT_RUN", required=False,
                      evidence_class="optional_backend", availability="unavailable",
                      capability=cap,
                      reason=cap.get("reason"),
-                     note="accepted local lmz provider is optional and absent; plain route is independent")
+                     note="accepted local lmz provider is optional; the default probe is sibling-independent")
         return
+    if not cap.get("available"):
+        campaign.row("lmz-interoperability", "NOT_RUN", required=False,
+                     evidence_class="optional_backend", availability="incompatible",
+                     capability=cap, lmz_root=lmz_root,
+                     reason=cap.get("reason"))
+        return
+
     provider = B.LmzBundleProvider()
-    archive = os.path.join(campaign.out, "optional-lmz-bundle.lmz")
-    destination = os.path.join(campaign.out, "optional-lmz-materialized")
+    archive = os.path.join(campaign.out, "lmz-interoperability.lmz")
+    destination = os.path.join(campaign.out, "lmz-interoperability-materialized")
+    sibling_before = _git_snapshot(lmz_root)
+    if (sibling_before is None or
+            sibling_before.get("head") != EXPECTED_LMZ_COMMIT or
+            sibling_before.get("branch") != "main" or
+            sibling_before.get("status")):
+        campaign.row(
+            "lmz-interoperability", "FAIL", required=True,
+            evidence_class="optional_backend", availability="incompatible",
+            lmz_root=lmz_root, expected_lmz_commit=EXPECTED_LMZ_COMMIT,
+            sibling_before=sibling_before,
+            reason="configured lmz root is not the accepted clean main commit")
+        return
+    records = {}
     error = None
-    inventory = None
+    create_result = validate_result = inventory = materialized = None
+    semantic_checks = {}
+    entry_checks = []
+    output_matches = []
+    create_data = validate_data = inventory_data = materialize_data = None
+    sibling_after_success = None
+    sibling_unchanged = False
     try:
         with open(bundle["manifest_path"], encoding="utf-8") as fh:
             manifest = json.load(fh)
-        provider.create(bundle["source_root"], archive, manifest=manifest)
-        inventory = provider.inventory(archive, strict=True)
-        provider.materialize(archive, destination)
+        record = _new_record("lmz-create")
+        create_result = provider.create(bundle["source_root"], archive, manifest=manifest,
+                                        observer=record, workers=1)
+        records["create"], create_data = campaign.record(record)
+        expected_manifest = create_result["manifest_sha256"]
+
+        record = _new_record("lmz-validate")
+        validate_result = provider.validate(
+            archive, observer=record, expected_manifest_sha256=expected_manifest)
+        records["validate"], validate_data = campaign.record(record)
+
+        record = _new_record("lmz-inventory")
+        inventory = provider.inventory(archive, strict=True, observer=record,
+                                       expected_manifest_sha256=expected_manifest)
+        records["inventory"], inventory_data = campaign.record(record)
+
+        record = _new_record("lmz-materialize")
+        result = provider.materialize(
+            archive, destination, observer=record,
+            expected_manifest_sha256=expected_manifest)
+        records["materialize"], materialize_data = campaign.record(record)
+        materialized = result.to_dict()
+
+        expected_paths = {entry["path"] for entry in bundle["entries"]}
+        actual_paths = {entry["path"] for entry in inventory["entries"]}
+        semantic_checks["exact_seven_paths"] = actual_paths == expected_paths
+        semantic_checks["no_manifest_artifact"] = "bundle.json" not in actual_paths
+        semantic_checks["validate_verified"] = bool(validate_result.get("valid"))
+        semantic_checks["inventory_verified"] = bool(inventory.get("valid"))
+        semantic_checks["materialized_route"] = materialized.get("route") == "lmz"
+        semantic_checks["materialized_transferred_unfabricated"] = \
+            materialized.get("transferred_bytes") is None
+        actual_bundle = inventory.get("bundle", {})
+        input_bundle = manifest.get("bundle", manifest)
+        for key in ("schema", "id", "version", "source", "license", "entry_point",
+                    "consumer", "io", "preprocess", "temporal_state", "evaluation",
+                    "provenance"):
+            if key in input_bundle:
+                semantic_checks[f"semantic_{key}"] = actual_bundle.get(key) == input_bundle.get(key)
+        expected_by_path = {entry["path"]: entry for entry in bundle["entries"]}
+        entry_checks = []
+        for actual in inventory["entries"]:
+            expected = expected_by_path.get(actual["path"])
+            entry_checks.append({
+                "path": actual["path"],
+                "role": actual.get("role") == expected.get("role") if expected else False,
+                "id": actual.get("id") == expected.get("id") if expected else False,
+                "length": actual.get("length") == expected.get("length") if expected else False,
+                "sha256": actual.get("sha256") == expected.get("sha256") if expected else False,
+                "dependencies": actual.get("dependencies", []) ==
+                expected.get("dependencies", []) if expected else False,
+            })
+        semantic_checks["entries_preserve_identity_and_dependencies"] = \
+            all(all(value for key, value in item.items() if key != "path")
+                for item in entry_checks)
+        output_paths = []
+        output_matches = []
+        for root, _dirs, names in os.walk(destination):
+            for name in names:
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, destination).replace(os.sep, "/")
+                output_paths.append(rel)
+        for entry in bundle["entries"]:
+            output = os.path.join(destination, *entry["path"].split("/"))
+            output_matches.append({"path": entry["path"], "exists": os.path.isfile(output),
+                                   "sha256": file_sha256(output) if os.path.isfile(output) else None,
+                                   "expected_sha256": entry["sha256"]})
+        semantic_checks["materialized_exact_seven_paths"] = \
+            set(output_paths) == expected_paths
+        semantic_checks["materialized_byte_identity"] = \
+            all(item["exists"] and item["sha256"] == item["expected_sha256"]
+                for item in output_matches)
+        semantic_checks["entry_point_details"] = (
+            inventory.get("entry_point_details", {}).get("path") == "model.onnx" and
+            inventory.get("entry_point_details", {}).get("kind") == "graph")
+        semantic_checks["consumer_operator_contract"] = (
+            inventory.get("consumer", {}).get("required_operators") == ["Add"] and
+            inventory.get("consumer", {}).get("extensions") == [])
+        semantic_checks["dependency_range"] = any(
+            dep.get("path") == "weights.bin" and dep.get("offset") == 3 and
+            dep.get("length") == 4 and dep.get("id")
+            for entry in inventory["entries"] for dep in entry.get("dependencies", []))
+        semantic_checks["resource_fact"] = (
+            (inventory.get("resources", {}).get("decode_workspace") or {}).get("bytes") == 4096)
+        semantic_checks["semantic_resources"] = (
+            (actual_bundle.get("resources", {}).get("decode_workspace") ==
+             input_bundle.get("resources", {}).get("decode_workspace")))
+        semantic_checks["materialized_resource_fact"] = (
+            actual_bundle.get("resources", {}).get("materialized_bytes") ==
+            sum(entry["length"] for entry in bundle["entries"]))
+        semantic_checks["state_fact"] = inventory.get("bundle", {}).get("temporal_state") == \
+            input_bundle.get("temporal_state")
+        sibling_after_success = _git_snapshot(lmz_root)
+        sibling_unchanged = sibling_before == sibling_after_success
     except BaseException as exc:
         error = exc
-    campaign.row("lmz-complete-bundle", "PASS" if error is None else "FAIL",
-                 required=True, evidence_class="optional_backend", availability="configured",
-                 capability=cap, archive=_digest(archive) if os.path.exists(archive) else None,
-                 inventory=inventory, destination=destination if os.path.exists(destination) else None,
-                 error=_error(error), sibling_mutation="none; run-directory output only")
+        sibling_after_success = _git_snapshot(lmz_root)
+        sibling_unchanged = sibling_before == sibling_after_success
+
+    campaign.row(
+        "lmz-interoperability", "PASS" if error is None and all(semantic_checks.values()) and
+        sibling_unchanged else "FAIL", required=True, evidence_class="optional_backend",
+        availability="configured", lmz_root=lmz_root,
+        expected_lmz_commit=EXPECTED_LMZ_COMMIT,
+        lmz_commit=sibling_before.get("head"),
+        capability=cap, archive=_digest(archive) if os.path.exists(archive) else None,
+        input_manifest_sha256=(create_result or {}).get("input_manifest_sha256")
+        if create_result else None,
+        provider_manifest_sha256=(create_result or {}).get("manifest_sha256")
+        if create_result else None,
+        bundle_sha256=(create_result or {}).get("bundle_sha256") if create_result else None,
+        result=(materialized or None), inventory=inventory,
+        validate=validate_result, records=records, observer_records={
+            "create": create_data if create_result is not None else None,
+            "validate": validate_data if validate_result is not None else None,
+            "inventory": inventory_data if inventory is not None else None,
+            "materialize": materialize_data if materialized is not None else None,
+        }, entry_checks=entry_checks, output_matches=output_matches,
+        semantic_checks=semantic_checks, sibling_before=sibling_before,
+        sibling_after=sibling_after_success, sibling_unchanged=sibling_unchanged,
+        error=_error(error), note="separate read-only local sibling integration; default probe remains independent")
+
+    def wrong_digest(record, _destination):
+        provider.validate(archive, observer=record, expected_manifest_sha256="0" * 64)
+
+    def ceiling(record, dest):
+        provider.materialize(archive, dest, observer=record,
+                             expected_manifest_sha256=expected_manifest,
+                             max_bytes=bundle["total_bytes"] - 1)
+
+    def cancelled(record, dest):
+        provider.materialize(archive, dest, observer=record,
+                             expected_manifest_sha256=expected_manifest,
+                             cancellation=lambda: True)
+
+    def provider_failure(record, _destination):
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("injected lmz provider failure")
+        with mock.patch.object(provider, "_function", return_value=broken):
+            provider.inventory(archive, observer=record, strict=True)
+
+    if error is None:
+        _record_lmz_negative(campaign, provider, archive, "wrong-expected-digest", wrong_digest)
+        _record_lmz_negative(campaign, provider, archive, "allocation-ceiling", ceiling)
+        _record_lmz_negative(campaign, provider, archive, "cancellation-boundary", cancelled)
+        _record_lmz_negative(campaign, provider, archive, "provider-failure", provider_failure)
 
 
 def run_claim_boundaries(campaign):
@@ -833,6 +1087,8 @@ def run_regression(campaign):
     import re
     total = re.search(r"Ran (\d+) tests", output)
     skipped = re.search(r"skipped=(\d+)", output)
+    total_count = int(total.group(1)) if total else None
+    skipped_count = int(skipped.group(1)) if skipped else 0
     skip_categories = {}
     for reason in re.findall(r"skipped ['\"]([^'\"]+)['\"]", output):
         skip_categories[reason] = skip_categories.get(reason, 0) + 1
@@ -840,8 +1096,9 @@ def run_regression(campaign):
                 if "ResourceWarning" in line or "warning" in line.lower()]
     campaign.row("full-regression", "PASS" if final.returncode == 0 else "FAIL",
                  required=True, evidence_class="compatibility", returncode=final.returncode,
-                 tests=int(total.group(1)) if total else None,
-                 skipped=int(skipped.group(1)) if skipped else 0,
+                 tests=total_count,
+                 non_skipped=(total_count - skipped_count) if total_count is not None else None,
+                 skipped=skipped_count,
                  skip_categories=skip_categories, warnings=warnings,
                  attempts=len(attempts), log=os.path.basename(log_path),
                  initial_returncode=attempts[0].returncode,
@@ -873,7 +1130,7 @@ def run_stdlib_core_check(campaign):
                  optional_imports="lmz, onnxruntime, onnx and torch absent from core path")
 
 
-def run_campaign(out, *, repo_root=None, regression=True):
+def run_campaign(out, *, repo_root=None, regression=True, lmz_root=None):
     out = os.path.abspath(out)
     os.makedirs(out, exist_ok=True)
     repo_root = os.path.abspath(repo_root or os.path.join(
@@ -886,6 +1143,7 @@ def run_campaign(out, *, repo_root=None, regression=True):
         "branch": _git_value(repo_root, "branch", "--show-current"),
         "primary_checkout_policy": "preserved outside this worktree",
         "siblings": "read-only; no lmz files are edited",
+        "lmz_root": os.path.abspath(lmz_root) if lmz_root else None,
     }
     campaign = Campaign(out, repo_root)
     # Set an immutable fixture pointer before cases begin so records can carry
@@ -929,7 +1187,7 @@ def run_campaign(out, *, repo_root=None, regression=True):
         campaign.row("onnxruntime-cpu", "NOT_RUN", required=False,
                      reason="plain materialization prerequisite failed")
     try:
-        run_optional_lmz(campaign, bundle)
+        run_optional_lmz(campaign, bundle, lmz_root=lmz_root)
     except BaseException as exc:
         campaign.exception("lmz-stage", exc)
         campaign.row("lmz-complete-bundle", "FAIL", required=True,
@@ -968,11 +1226,20 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out")
     parser.add_argument("--repo-root", default=None)
+    parser.add_argument("--lmz-root", default=None,
+                        help="optional read-only sibling root for a separate lmz integration run")
     parser.add_argument("--no-regression", action="store_true")
     args = parser.parse_args(argv)
     out = args.out or tempfile.mkdtemp(prefix="lmsluice-mm-sluice-01-")
+    if args.lmz_root:
+        lmz_root = os.path.abspath(args.lmz_root)
+        if not os.path.isdir(lmz_root):
+            raise SystemExit(f"--lmz-root is not a directory: {lmz_root}")
+        sys.path.insert(0, lmz_root)
+    else:
+        lmz_root = None
     return run_campaign(out, repo_root=args.repo_root,
-                        regression=not args.no_regression)
+                        regression=not args.no_regression, lmz_root=lmz_root)
 
 
 if __name__ == "__main__":
