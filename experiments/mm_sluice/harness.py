@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from unittest import mock
 
 from experiments.device_readiness.archive import create_archive
-from experiments.mm_sluice.fixtures import generate_bundle, file_sha256
+from experiments.mm_sluice.fixtures import audit_onnx_graph, generate_bundle, file_sha256
 from lmsluice import ReadinessRecord
 from lmsluice import bundle as B
 from lmsluice import onnxruntime_adapter as ORT
@@ -356,6 +356,19 @@ def run_contract(campaign, bundle):
         campaign.exception("bundle-contract", exc)
         campaign.row("bundle-contract", "FAIL", required=True,
                      evidence_class="synthetic_transport", error=_error(exc))
+
+
+def run_fixture_audit(campaign, bundle):
+    try:
+        audit = audit_onnx_graph(bundle["graph_path"], bundle["weights_path"])
+    except BaseException as exc:
+        campaign.exception("onnx-graph-structure", exc)
+        campaign.row("onnx-graph-structure", "FAIL", required=True,
+                     evidence_class="synthetic_transport", error=_error(exc))
+    else:
+        campaign.row("onnx-graph-structure", "PASS", required=True,
+                     evidence_class="synthetic_transport", **audit,
+                     note="wire-format fixture audit; no ONNX parser or runtime dependency")
 
 
 def run_negative(campaign, bundle, name, action, *, evidence_class="simulated_constraint"):
@@ -878,6 +891,11 @@ def run_campaign(out, *, repo_root=None, regression=True):
     # Set an immutable fixture pointer before cases begin so records can carry
     # the same manifest identity even when a negative source is mutated.
     _write_json(os.path.join(out, "fixture.json"), bundle)
+    try:
+        run_fixture_audit(campaign, bundle)
+    except BaseException as exc:
+        campaign.exception("fixture-audit-stage", exc)
+        campaign.row("fixture-audit-stage", "FAIL", required=True, error=_error(exc))
     try:
         run_contract(campaign, bundle)
     except BaseException as exc:

@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from experiments.mm_sluice.fixtures import generate_bundle
+from experiments.mm_sluice.fixtures import audit_onnx_graph, generate_bundle
 from lmsluice import ReadinessRecord
 from lmsluice import bundle as B
 from lmsluice.onnxruntime_adapter import OnnxCPUConsumer, capability
@@ -33,6 +33,16 @@ class TestBundle(unittest.TestCase):
         self.assertEqual(descriptor.identity, self.fixture["manifest_sha256"])
         self.assertEqual(descriptor.graph.path, "model.onnx")
         self.assertEqual(descriptor.total_bytes, self.fixture["total_bytes"])
+        self.assertEqual(
+            audit_onnx_graph(self.fixture["graph_path"], self.fixture["weights_path"]),
+            {
+                "operator": "Add",
+                "external_location": "weights.bin",
+                "external_offset": 3,
+                "external_length": 4,
+                "external_float": 1.0,
+            },
+        )
         graph = next(entry for entry in descriptor.entries if entry.path == "model.onnx")
         self.assertEqual(graph.dependencies[0].path, "weights.bin")
         self.assertEqual(graph.dependencies[0].offset, 3)

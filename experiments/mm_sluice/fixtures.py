@@ -96,6 +96,88 @@ def onnx_add_external_graph() -> bytes:
             _bfield(7, graph) + _bfield(8, opset))
 
 
+def _wire_varint(data: bytes, offset: int):
+    value = 0
+    shift = 0
+    while True:
+        if offset >= len(data) or shift > 63:
+            raise ValueError("truncated protobuf varint")
+        item = data[offset]
+        offset += 1
+        value |= (item & 0x7F) << shift
+        if item < 0x80:
+            return value, offset
+        shift += 7
+
+
+def _wire_fields(data: bytes):
+    fields = []
+    offset = 0
+    while offset < len(data):
+        tag, offset = _wire_varint(data, offset)
+        number, wire_type = tag >> 3, tag & 7
+        if wire_type == 0:
+            value, offset = _wire_varint(data, offset)
+        elif wire_type == 2:
+            length, offset = _wire_varint(data, offset)
+            end = offset + length
+            if end > len(data):
+                raise ValueError("truncated protobuf bytes field")
+            value, offset = data[offset:end], end
+        else:
+            raise ValueError(f"unsupported fixture protobuf wire type {wire_type}")
+        fields.append((number, wire_type, value))
+    return fields
+
+
+def audit_onnx_graph(graph_path: str, weights_path: str) -> dict:
+    """Check the generated graph's small external-data contract without onnx."""
+    with open(graph_path, "rb") as fh:
+        model = _wire_fields(fh.read())
+    graph = next(value for number, wire_type, value in model
+                 if number == 7 and wire_type == 2)
+    node = next(value for number, wire_type, value in _wire_fields(graph)
+                if number == 1 and wire_type == 2)
+    tensor = next(value for number, wire_type, value in _wire_fields(graph)
+                  if number == 5 and wire_type == 2)
+    node_fields = _wire_fields(node)
+    operator = next(value.decode("utf-8") for number, wire_type, value in node_fields
+                    if number == 4 and wire_type == 2)
+    external = {}
+    for item in _wire_fields(tensor):
+        if item[0] != 13 or item[1] != 2:
+            continue
+        entry = _wire_fields(item[2])
+        key = next(value.decode("utf-8") for number, wire_type, value in entry
+                   if number == 1 and wire_type == 2)
+        value = next(value.decode("utf-8") for number, wire_type, value in entry
+                     if number == 2 and wire_type == 2)
+        external[key] = value
+    location = external.get("location")
+    offset = int(external.get("offset", "-1"))
+    length = int(external.get("length", "-1"))
+    data_location = next(value for number, wire_type, value in _wire_fields(tensor)
+                         if number == 14 and wire_type == 0)
+    if operator != "Add" or location != "weights.bin" or offset != 3 or length != 4:
+        raise ValueError("generated ONNX external-data contract is inconsistent")
+    if data_location != 1:
+        raise ValueError("generated ONNX tensor is not marked EXTERNAL")
+    with open(weights_path, "rb") as fh:
+        payload = fh.read()
+    if len(payload[offset:offset + length]) != length:
+        raise ValueError("generated ONNX external-data range is truncated")
+    value = struct.unpack("<f", payload[offset:offset + length])[0]
+    if value != 1.0:
+        raise ValueError("generated ONNX external-data value changed")
+    return {
+        "operator": operator,
+        "external_location": location,
+        "external_offset": offset,
+        "external_length": length,
+        "external_float": value,
+    }
+
+
 def file_sha256(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -216,5 +298,6 @@ def generate_bundle(directory: str, *, seed: int = SEED) -> dict:
     }
 
 
-__all__ = ["FIXTURE_VERSION", "SEED", "deterministic_bytes",
-           "file_sha256", "generate_bundle", "onnx_add_external_graph"]
+__all__ = ["FIXTURE_VERSION", "SEED", "audit_onnx_graph",
+           "deterministic_bytes", "file_sha256", "generate_bundle",
+           "onnx_add_external_graph"]
