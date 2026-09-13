@@ -34,6 +34,8 @@ except ImportError:  # pragma: no cover - exercised on native Windows.
 SCHEMA = 1
 UNMEASURED = "UNMEASURED"
 EVENTS = (
+    # Existing tensor/transport events. Their meaning and spelling are kept
+    # stable for callers that already consume schema 1 records.
     "source_open",
     "route_planned",
     "allocation",
@@ -44,7 +46,37 @@ EVENTS = (
     "consumer_first_useful",
     "consumer_ready",
     "terminal_failure",
+    # Additive complete-bundle lifecycle events. A missing event remains
+    # null; transport completion is never promoted to consumer validity.
+    "bundle_requested",
+    "bundle_resolved",
+    "bundle_verified",
+    "fetch_started",
+    "reconstruction_complete",
+    "materialization_complete",
+    "consumer_initialized",
+    "consumer_first_valid_output",
+    "use_started",
+    "release",
+    "cancelled",
 )
+
+LIFECYCLE_ORDER = (
+    "bundle_requested",
+    "bundle_resolved",
+    "route_planned",
+    "fetch_started",
+    "first_payload",
+    "reconstruction_complete",
+    "materialization_complete",
+    "consumer_initialized",
+    "use_started",
+    "consumer_first_valid_output",
+    "consumer_first_useful",
+    "consumer_ready",
+    "release",
+)
+_LIFECYCLE_INDEX = {name: index for index, name in enumerate(LIFECYCLE_ORDER)}
 
 _ERROR_QUERY = re.compile(
     r"([?&](?:[A-Za-z0-9_.-]*(?:sig|token|credential|signature|key|secret)"
@@ -113,6 +145,9 @@ class ReadinessRecord:
             "cipher": None,
             "credential_mode": None,
             "source": None,
+            "provider": None,
+            "bundle_identity": None,
+            "source_generation": None,
         }
         self.bytes = {
             "logical": 0,
@@ -120,6 +155,8 @@ class ReadinessRecord:
             "transferred": 0,
             "fetched": 0,
             "placed": 0,
+            "decoded": 0,
+            "materialized": 0,
             "repeated": 0,
         }
         self.coverage = {
@@ -142,8 +179,21 @@ class ReadinessRecord:
             "thread_settings": {},
             "limits": {},
             "contention": {},
+            "resource_bytes": {},
+            "resource_peak_bytes": {},
+            "destination_ownership": None,
+            "cleanup": None,
+            "cancellation_boundary": None,
+            "measurement_method": {},
+            "backend_memory": {"status": UNMEASURED},
         }
         self.failure = None
+        self.lifecycle = {
+            "phase": "created",
+            "events": [],
+            "order_violations": [],
+            "terminal_state": None,
+        }
         self.metadata = _json_value(metadata or {})
         self.provenance = _json_value(provenance or {})
         self.platform = {
@@ -184,9 +234,25 @@ class ReadinessRecord:
                 "at_s": at_ns / 1_000_000_000,
                 "details": _json_value(details),
             }
+            if event in _LIFECYCLE_INDEX:
+                prior = [name for name in self.lifecycle["events"]
+                         if name in _LIFECYCLE_INDEX]
+                if prior and _LIFECYCLE_INDEX[event] < max(
+                        _LIFECYCLE_INDEX[name] for name in prior):
+                    self.lifecycle["order_violations"].append({
+                        "event": event,
+                        "after": prior[-1],
+                    })
+                self.lifecycle["events"].append(event)
+                self.lifecycle["phase"] = event
+                if event in ("consumer_ready", "release"):
+                    self.lifecycle["terminal_state"] = event
+            elif event == "terminal_failure":
+                self.lifecycle["terminal_state"] = "terminal_failure"
 
     def set_route(self, *, planned=None, actual=None, fallback_reason=None,
-                  codec=None, cipher=None, credential_mode=None, source=None) -> None:
+                  codec=None, cipher=None, credential_mode=None, source=None,
+                  provider=None, bundle_identity=None, source_generation=None) -> None:
         """Set additive route facts without storing credentials."""
         values = {
             "planned": planned,
@@ -196,6 +262,9 @@ class ReadinessRecord:
             "cipher": cipher,
             "credential_mode": credential_mode,
             "source": safe_identity(source) if source is not None else None,
+            "provider": provider,
+            "bundle_identity": bundle_identity,
+            "source_generation": source_generation,
         }
         with self._lock:
             for key, value in values.items():
@@ -299,6 +368,7 @@ class ReadinessRecord:
                 "bytes": _json_value(self.bytes),
                 "coverage": _json_value(self.coverage),
                 "execution": _json_value(self.execution),
+                "lifecycle": _json_value(self.lifecycle),
                 "platform": _json_value(self.platform),
                 "resources": self._sampler.to_dict(),
                 "failure": _json_value(self.failure),
@@ -490,5 +560,5 @@ def _memory_sample() -> dict:
     return out
 
 
-__all__ = ["EVENTS", "ReadinessRecord", "ResourceSampler", "SCHEMA",
-           "UNMEASURED", "safe_identity"]
+__all__ = ["EVENTS", "LIFECYCLE_ORDER", "ReadinessRecord", "ResourceSampler",
+           "SCHEMA", "UNMEASURED", "safe_identity"]

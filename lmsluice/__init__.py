@@ -45,6 +45,12 @@ from .source import (CachedSource, FileSource, HttpSource, Source,
 from .transport import Report, transport
 from .observability import (EVENTS, ReadinessRecord, ResourceSampler,
                             UNMEASURED)
+from .bundle import (BundleCancelled, BundleDependency, BundleDescriptor,
+                     BundleEntry, BundleError, BundleRequest, BundleResult,
+                     BundleSourceChanged, LmzBundleProvider,
+                     PlainBundleProvider, canonical_manifest_sha256,
+                     inventory_bundle, materialize_bundle, provider,
+                     resolve_bundle, validate_bundle)
 
 __all__ = [
     "open_model", "Model", "NotMappable", "Tensor", "Archive",
@@ -57,4 +63,9 @@ __all__ = [
     "DeviceDecoder", "gpu_chunk_size", "Encoder", "Option",
     "transport", "Report", "__version__",
     "ReadinessRecord", "ResourceSampler", "EVENTS", "UNMEASURED",
+    "BundleError", "BundleSourceChanged", "BundleCancelled",
+    "BundleDependency", "BundleEntry", "BundleDescriptor", "BundleRequest",
+    "BundleResult", "PlainBundleProvider", "LmzBundleProvider", "provider",
+    "resolve_bundle", "validate_bundle", "inventory_bundle",
+    "materialize_bundle", "canonical_manifest_sha256",
 ]

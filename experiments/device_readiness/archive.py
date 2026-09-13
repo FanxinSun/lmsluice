@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import zipfile
 
 
@@ -17,6 +18,17 @@ def _files(run_dir: str, archive_path: str) -> list[tuple[str, str]]:
         for name in filenames:
             path = os.path.join(directory, name)
             if os.path.abspath(path) == archive:
+                continue
+            # Failure campaigns may intentionally leave a FIFO or symlink in
+            # their retained fixture tree. Opening one while creating the
+            # evidence archive could block forever or copy data outside the
+            # run. Structured failure rows already retain the detection; the
+            # archive includes only regular evidence files.
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
                 continue
             relative = os.path.relpath(path, root).replace(os.sep, "/")
             found.append((relative, path))
