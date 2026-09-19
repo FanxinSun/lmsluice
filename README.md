@@ -291,8 +291,12 @@ Three consequences, each of which is easy to get wrong:
 
 ## Buy me a coffee
 
-lmsluice is free, MIT-licensed and unfunded. If it saved you time or bandwidth —
+lmsluice is free and MIT-licensed. If it has been useful to you, you are warmly
+welcome to support its continued development with a coffee. There is no
+obligation at all—your interest, feedback, and use of the project already mean
+a great deal. Thank you.
 
 ### [☕ **Buy me a coffee**](https://buymeacoffee.com/fanxinsun)
 
-or [Alipay](assets/alipay.jpg) (打开支付宝，扫一扫). Thank you.
+If Buy Me a Coffee is not convenient, [Alipay](assets/alipay.jpg) is also
+available (打开支付宝，扫一扫). Thank you for helping this work continue.
