@@ -6,6 +6,18 @@ decides by measurement rather than assumption, and it says what it decided and
 on what numbers. Pure standard library, and nothing about the bytes changes:
 every weight arrives byte-identical.
 
+> **Current status — 2026-10-03:** use the [canonical plan](plan/PLAN.md) and
+> [handover intake](docs/handover-intake.md). Bundle delivery and optional-lmz
+> mechanics are accepted; real model quality, target readiness, affordability
+> and niche value remain open. The following older development-priority pointer
+> is **retired as plan authority** and retained as historical wording.
+> Numerical examples below are dated, machine-specific evidence/projections;
+> “needs no measurement” and universal download-win wording are retired as
+> guarantees. See the corrections in [MEASURED.md](MEASURED.md), including cold
+> cache uncertainty and a Mac host route where plain won. CPU/CUDA placement
+> does not establish MPS support; real ONNX Runtime execution remains NOT_RUN
+> in the accepted bundle campaign.
+
 Development priorities: [current plan](docs/strategy.md) — complete multimodal
 bundle delivery and consumer readiness, with affordability and niche positioning
 assessed independently. These are next-development priorities, not claims of

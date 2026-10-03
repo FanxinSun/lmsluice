@@ -1,5 +1,11 @@
 # SLUICE-A1 affordability and resource evaluation
 
+> **Intake status — 2026-10-03:** engineering collection is accepted; complete
+> system affordability remains INCONCLUSIVE. This is an evidence/requirements
+> record, not a separate work order. SLUICE-A1 in [the master](../../plan/PLAN.md)
+> governs later scope independently of B1; [the intake](../handover-intake.md)
+> distinguishes historical runs from current open evidence.
+
 This is an engineering affordability evaluation for the frozen synthetic
 workload. It does not price a product. The run compares a normal mmap loader,
 lmsluice plain transport and the stdlib-coded route on the executor's WSL2

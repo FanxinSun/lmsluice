@@ -1,5 +1,12 @@
 # Portable-device readiness plan and evidence gates
 
+> **Status/authority — 2026-10-03:** P0–P5 and the final cache correction are
+> accepted at `809a7172f03288e4fe9496545d3f35a66cb5ed65`. This original unit plan
+> is retained as its contract/evidence history; its execution order is **retired**
+> as an active queue. Current work is governed only by [the master](../../plan/PLAN.md),
+> including SLUICE-CORRECTNESS-0, SLUICE-USE-0 and independent SLUICE-A1/B1.
+> No repeat run or device/competitor verdict follows from this intake.
+
 This work tests whether lmsluice remains useful if a small portable AI device
 combines voice and vision workloads with tight memory, power and connectivity
 limits. The strategic trigger is a reported possibility of an OpenAI portable

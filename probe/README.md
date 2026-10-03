@@ -1,5 +1,12 @@
 # probe — can this machine decode faster than its disk?
 
+> **Planning reference — 2026-10-03:** this probe record is historical. Its
+> proposed ports/calibration tasks are **retired as an independent work order**
+> and remain held candidates under [SLUICE-OPT-0](../plan/PLAN.md).
+> Arithmetic/occupancy estimates do not establish decoder throughput or native
+> Apple GPU support. Historical macOS host measurements are in `MEASURED.md`;
+> they do not certify this GPU probe or MPS placement.
+
 One question, asked of whatever silicon is present, before any of it is
 trusted with a load path.
 

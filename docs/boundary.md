@@ -1,5 +1,27 @@
 # The lmz / lmsluice boundary
 
+> **Current clarification — 2026-10-03:** ownership and the five invariants
+> remain load-bearing. The [canonical master](../plan/PLAN.md) alone schedules
+> work; references below calling strategy the current plan are **retired**.
+> The September 13 “planned bundle support” statement is a **retired status**:
+> MM-SLUICE-01 is accepted for generated bundle delivery, owned placement and
+> optional actual-lmz interoperability, not real-model quality or engine proof.
+> See [intake and acceptance boundaries](handover-intake.md).
+>
+> The old “only module that may import lmz” restriction is **retired in that
+> absolute form**: `lmzcodec.py` remains the codec adapter, while the accepted
+> `bundle.py` optional provider lazily delegates to public lmz bundle APIs.
+> Neither permission allows copying lmz container parsing or decoder semantics.
+> I1 concerns the decoder core; public bundle/file helpers are consumer APIs,
+> not permission to move transport scheduling into that core.
+>
+> CPU/CUDA tensor placement is implemented; the torch adapter explicitly rejects
+> MPS. Host loading plus caller-owned MPS transfer is separate and needs its own
+> qualification. No native Metal decoder, direct MPS placement or framework
+> numerical parity is established here. Inference lifecycle/deadlines remain
+> runtime-owned; vram is training-residency only. Both listed live loan rows
+> remain open; older references to three loans are a retired count, not a new loan.
+
 *Where a piece of work goes, and how to settle an argument about it without
 asking anyone. If you are about to add a file to either tree, this is the
 document to read first.*
@@ -52,7 +74,20 @@ in two.
 | whether to write compressed at all on this machine | **lmsluice** |
 | end-to-end verification that a *moved* model is byte-identical | **lmsluice** |
 | encryption at rest: the envelope, keys, nonces, tags, the structure MAC | **lmsluice** |
-| placement solver, tier budgets, eviction, prefetch, compute overlap | **vram** |
+| training-state placement solver, tier budgets, eviction, prefetch, compute overlap | **vram**, within its training-residency charter |
+| inference resident-set/lifecycle policy, sensor/temporal state, frame deadlines and permissions | **YFCE runtime / `os/`**, not the transport or training planner |
+
+### Multimodal extension — 2026-09-13
+
+The [current development plan](strategy.md) extends the population to acoustic,
+visual, passive spatial and language/multimodal consumers without moving the
+five invariants or retiring any live loan. lmz owns coded bundle structure and
+artifact/decode metadata; lmsluice owns format-neutral sources, verified delivery,
+materialization/placement and optional consumer adapters. An adapter may report
+engine initialization and first valid output without turning the core into an
+inference engine. Runtime owns live streams, grants, state and scheduling.
+The vram row above is training ownership, not a blanket assignment of portable
+inference scheduling. Planned bundle support is not an implemented capability.
 
 One duplication is deliberate: lmz parses a safetensors header to decide **how to
 code**; lmsluice parses one to **index a plain file it will never code**. Both are

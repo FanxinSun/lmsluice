@@ -1,5 +1,112 @@
 # lmsluice canonical master plan
 
+## Current authority and intake — 2026-10-03
+
+This section is the **one authoritative project execution order**, shared by
+all agents. The September 23 two-step order preserved below is **retired as a
+project-wide order**, not deleted. Its PaP ownership matrix, design constraints
+and future-fixture specification remain incorporated requirements for
+SLUICE-PAP-0/1. References to strategy Section 0 as the governing plan are
+retired; that document is a retained requirements/rationale annex.
+
+The user's instruction, “intake all handed over update docs”, authorizes this
+documentation reconciliation. It does not start any held implementation,
+experiment, download, target/cloud work, history integration or publication.
+The [intake record](../docs/handover-intake.md) identifies superseding handovers
+and evidence boundaries. Agent review bookkeeping is separate from this plan.
+
+## Current authoritative execution order
+
+Rows are ordered; the two independent assessment tracks in row 4 may proceed
+separately when individually authorized. A blocked optional track does not
+block the other. Rows define leaf-level bounded scopes, not automatic dispatch.
+Correctness and ownership constraints apply throughout, not just at row 2.
+SLUICE-USE-0 is the shared technical qualification scope when needed, not a
+prerequisite to defining or assessing A1/B1 independently. An adequate existing
+route result may satisfy it without a new campaign. The order does not defer
+necessary correctness repairs pending product-strategy success.
+
+| Order | Stable step | Current status and completion gate |
+|---|---|---|
+| 1 | **SLUICE-PAP-0** | PaP mapping accepted September 25; local cross-document correction completed by this intake. Overall **IN_PROGRESS**: publication/history integration and any renewed upstream assessment remain pending. Preserve the original completion conditions below. |
+| 2 | **SLUICE-CORRECTNESS-0** | **ONGOING constraint; no new run assigned.** Preserve accepted P0–P5/cache and MM-SLUICE-01 behavior, plain/stdlib compatibility, existing tensor integrations, safe ownership, five invariants and live boundary loans. A future change must validate its affected contracts and disclose skips/failures. |
+| 3 | **SLUICE-USE-0** | **HELD, scope/input approval required.** Qualify one useful real delivery-to-consumer route using adequate existing evidence first. Freeze normal/plain/optional-coded comparisons, artifact closure, inputs, output acceptance, engine/backend, target, cache state, copies/synchronization, limits and stop conditions before execution. Actual-engine opening/output remains unproved by MM-SLUICE-01. |
+| 4 | **SLUICE-A1** and **SLUICE-B1** | **Independent, INCONCLUSIVE product assessments.** Synthetic engineering collection is accepted, not a device/customer verdict. Each requires its own named inputs and bounded authorization; neither requires the other's success. Requirements are retained below and in strategy Section 0. |
+| 5 | **SLUICE-PAP-1** | **NOT_STARTED / HELD.** Preserve the complete original generated-fixture definition below. Requires fixed C06 descriptor and PAP-1/PAP-2 consumer contracts plus a new bounded approval. Broad PaP implementation additionally waits for a concrete device/workflow; no device is selected here. |
+| 6 | **SLUICE-OPT-0** | **HELD candidate pool, not an implementation queue.** Select only a measured limiting gap after the applicable route/value assessment. Order-aware delivery, write overlap/delta, multi-model reuse, cache policy, durable resume and device work are separate possible scopes, not commitments to implement all of them. |
+
+### Incorporated live requirements and historical phase disposition
+
+All original explanations and decisions in [strategy](../docs/strategy.md),
+[boundary](../docs/boundary.md), the [engineering gap record](../docs/evaluations/engineering-gaps.md)
+and the original PaP text below are retained as specification/rationale inputs.
+Their numbered lists describe requirements or historical sequences; they do
+not schedule work independently of the order above.
+
+| Retained content | Canonical disposition |
+|---|---|
+| Strategy Section 0, MM-SLUICE-01; readiness P0–P5 | **ACCEPTED mechanics**, not future work to rebuild. Maintenance gate: SLUICE-CORRECTNESS-0; actual-consumer gap: SLUICE-USE-0. |
+| Strategy Section 0, SLUICE-A1 | Preserve normal/plain/coded same-workload comparison; first useful output versus complete readiness, bytes/storage, peak memory, CPU contention, latency tails, energy/thermal and low-resource/unified-memory accounting. Separate BOM reduction from headroom and operating cost; include host/service cost and broad capability/quality. Target, costs and real quality remain unavailable. |
+| Strategy Section 0, SLUICE-B1 | Preserve independent candidate comparison (private/restricted delivery, constrained distribution, model switching); identify buyer, trigger, alternatives, integration/support burden, security/recovery and willingness-to-adopt evidence. Compare at least two credible workflows before selecting a niche. A mechanism PASS or encryption feature is not customer validation. |
+| Strategy next-cycle validation and correctness; boundary I1–I5 | SLUICE-CORRECTNESS-0 throughout. Keep full failures/detection, optional NOT_RUN, unavailable metrics, no-false-ready and clean ownership evidence. No separate old next-cycle order remains active. |
+| Historical Phase A0 and Phase A | Standard-codec adapter and drop-in tensor/integration surfaces already implemented; maintain compatibility, do not restart. Historical consumer results are conditional on recorded versions/workloads. |
+| Historical Phase B | Opt-in cache implemented; accepted fast-path correction reads zero source-content bytes on a valid hit. Stat identity is not publisher authentication. Sampled cache codec/ratio versus actual writer choice remains a candidate gap, not declared repaired by this intake. |
+| Historical Phase 0 | Scaling/slow-link measurements retained as dated evidence. SLUICE-USE-0 reuses adequate comparisons; no generic rerun or expansion to an unsupported device table. |
+| Historical Phase 0.5 | Object reads/uploads implemented, anonymous real reads recorded, signing/local failure checks accepted. Signed hosted-store/WAN evidence remains open; only an approved endpoint/credential/resource scope may close it. |
+| Historical Phases 1–3 | Consumer-order streaming, overlap/delta write paths and model-family/switching reuse remain SLUICE-OPT-0 candidates. File-order streaming is not consumer-order delivery; restart-from-zero is not durable resume. |
+| Historical Phase 4; probe GPU proposals | Device decode/placement optimization conditional on demonstrated benefit and a validated backend. GDS stays shelved; GPU calibration and live loans are not silently resolved. |
+| Original intake residual register | Missing historical fixtures/logs and broken cache symlinks remain recorded gaps, not downloads or repairs assigned here. Warning cleanup belongs to bounded correctness work; parent gitlink integration remains separate, unapproved repository coordination. Old large-model campaigns stay closed. |
+| September 20 PaP follow-ons | Preserve conditional engine comparison, range/resume/prefetch/cache-source and identity-scoped admission/GC ideas under SLUICE-USE-0 / SLUICE-OPT-0. G5/use-case need and a new owner-approved brief are required; no global aggressive dedup service or control transport is assigned. |
+
+### Accepted baseline and remaining evidence gates
+
+P0–P5 and cache correction were accepted at `809a7172f03288e4fe9496545d3f35a66cb5ed65`:
+195 total tests = 157 passes + 38 skips. MM-SLUICE-01 was accepted at
+`c5927d9f22474bfeccfe0bb27e4ad430cedbefd5`: clean regression 207 total = 169
+passes + 38 skips. Both commits are ancestors of the inspected local HEAD.
+These are attributed historical results, not tests rerun during this intake.
+
+MM-SLUICE-01's real lmz API interop on generated artifacts passed separately;
+the default lmz and actual ONNX Runtime arms were NOT_RUN. Consumer-valid-output
+was simulated lifecycle evidence. Trained speech/vision/language quality,
+target power/thermal/memory, affordability and specialist value remain open.
+No universal route threshold or OpenAI-device comparison is established.
+
+CPU/CUDA tensor placement exists; the inspected torch adapter rejects MPS.
+Host loading followed by application-owned MPS transfer is a distinct route,
+not direct Metal placement, zero-copy interoperability or CUDA translation.
+Bundle publication is accepted only for tested POSIX/WSL safe primitives and
+fails closed elsewhere. Historical Mac host measurements do not certify a
+Mac bundle or MPS route. LMZ's existing real-model/corpus evidence is credited
+without being repurposed as lmsluice application benefit.
+
+Runtime/OS retains inference residency, temporal state, deadlines, safety and
+permissions; vram retains training residency; lmz retains formats/decoders.
+C06 semantic trust, grants, licensing, compatibility and release acceptance
+stay external. No new dependency on siblings or custom silicon is imposed.
+Portfolio time/stream limits were proposals, not policy; resource/effort caps
+remain unset until a concrete approved unit. The observer track is not canceled.
+
+### Documentation completion and publication boundary
+
+This intake resolves the September 25 authority conflict locally and records
+coverage separately. It does not claim Supreme reacceptance or publication.
+Inspected local `master` remains one commit ahead and one behind the existing
+`origin/master` tracking ref. No fresh fetch, merge, rebase, commit, push, tag or
+gitlink update is part of this documentation task. Existing report-return and
+publication history is retained, not reset by introducing these status notes.
+
+## Retired September 23 order and preserved PaP specification
+
+The original text below is preserved verbatim. Its two-step-only authority,
+IN_PROGRESS snapshot and old checklist wording are **retired as current
+project-wide authority**; use the current order above. Its detailed contract,
+exclusions, fixture definition and pending publication condition remain live
+requirements of the named current steps, not a second executable sequence.
+
+<details>
+<summary>Original September 23 plan — retained history and incorporated requirements</summary>
+
 Status: planning baseline for PaP intake, consolidated 2026-09-23.
 
 This is lmsluice's single canonical master plan. Its authoritative execution
@@ -144,3 +251,5 @@ all repository-local Markdown links resolve, and the scoped validation,
 commit/publication and final evidence return are recorded truthfully. A remote
 advance, authentication failure or any need for merge or rebase blocks
 publication rather than authorizing history integration.
+
+</details>

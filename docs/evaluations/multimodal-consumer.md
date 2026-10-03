@@ -1,5 +1,13 @@
 # MM-SLUICE-01 bundle delivery and consumer boundary
 
+> **Acceptance status — 2026-10-03 intake:** MM-SLUICE-01 is accepted at
+> `c5927d9f22474bfeccfe0bb27e4ad430cedbefd5`, including separate real-lmz API
+> interoperability on generated artifacts. Actual ONNX Runtime remains NOT_RUN;
+> the valid-output PASS is simulated lifecycle evidence. This contract is not a
+> new work order. The actual-consumer gate is held under SLUICE-USE-0 in
+> [the master](../../plan/PLAN.md); [the intake](../handover-intake.md) retains
+> the complete acceptance boundaries and historical result counts.
+
 This document records the lmsluice side of the multimodal artifact-to-consumer
 contract. It covers verified complete-bundle delivery, owned materialization,
 additive lifecycle evidence and the optional ONNX Runtime CPU boundary. It is

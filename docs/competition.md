@@ -1,5 +1,12 @@
 # The competition — what else moves model weights, and how lmsluice compares
 
+> **Historical record — 2026-10-03:** all original comparisons remain dated
+> evidence, not freshly checked market facts. Earlier missing-feature statements
+> and proposed implementation orders are **retired as current status/order**;
+> later accepted capabilities and gaps are indexed in [the intake](handover-intake.md).
+> Only [the canonical master](../plan/PLAN.md) schedules work. Retain plain wins,
+> adverse comparisons and measurement corrections; do not infer universal benefit.
+
 *Written 2026-08-30. Every competitor number below is **published by its
 author** and is quoted with the hardware it was taken on; every lmsluice number
 is from `MEASURED.md` and names this box (9800X3D / RTX 5080 / 24 GB WSL2,

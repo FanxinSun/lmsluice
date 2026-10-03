@@ -1,8 +1,248 @@
 # Strategy — what lmsluice is for, and what to build next
 
-*Written 2026-08-30, after a session that produced a lot of correctness work and
-no direction. Everything below is argued from measurements in `MEASURED.md`
-rather than from intuition, and the uncomfortable conclusions are kept.*
+> **Authority update — 2026-10-03:** the [canonical master](../plan/PLAN.md)
+> supplies the only current execution order. All original text below is retained.
+> Claims that Section 0 governs, its “Current development plan” label, the
+> “Next-cycle ordering” sequence and Section 5's pointer to Section 0 are
+> **retired as planning authority**. This document is a requirements/rationale
+> annex, not a second plan. The master maps all live tracks and historical phases.
+>
+> **Status correction:** P0–P5/cache (`809a717…`) and MM-SLUICE-01 (`c5927d9…`)
+> are accepted bounded mechanics and are ancestors of local master. The old
+> “next bounded unit” and separate-worktree statements are retired snapshots.
+> Real lmz API interoperability passed on generated bundles; actual ONNX Runtime
+> remained NOT_RUN. Real quality/device evidence and A1/B1 product verdicts remain
+> inconclusive. See [intake evidence](handover-intake.md). SLUICE-USE-0 covers the
+> held actual-consumer gap; no campaign or optimization is started by this update.
+>
+> Historical universal download/decoder/unified-memory projections are not
+> current support guarantees: calibration, backend, copies, synchronization,
+> contention and consumer acceptance govern a named route. Existing LMZ corpus
+> results are codec evidence, not lmsluice delivery or commercial evidence.
+
+*Current development direction: 2026-09-13, extending the September 10 independent
+tracks to acoustic, visual, physical/spatial and language/multimodal consumers.
+Section 0 governs the next development cycle. Sections 1–7 retain
+the reasoning and measurement history begun on 2026-08-30; their phase labels,
+competitive claims and implementation-status statements are not a current
+execution queue. Check the tree and evidence before reusing them.*
+
+## 0. Current development plan — 2026-09-13
+
+### Decision: two independent tracks, one transport product
+
+- **A — affordability:** can efficient loading make a cheaper complete system
+  practical while retaining the broad YFCE capability/quality baseline?
+- **B — niche positioning:** which specialized deployment problem is valuable
+  enough to adopt this transport? More expensive hardware is allowed; Track A's
+  price ceiling is not a gate for B.
+
+Neither assessment requires the other to pass. An affordable niche product is
+an optional intersection, not the chosen direction. No customer lane, device,
+memory capacity or price is selected by this update. Keep separate findings and
+go/no-go decisions even when raw measurements are shared.
+
+lmsluice remains independently useful and codec-independent. The plain-file
+path is a first-class product path; lmz is an optional codec, not an adoption
+prerequisite. YFCE is one consumer, not the only business case. Keep one core,
+existing integrations and correctness/compatibility obligations. Ownership in
+[boundary.md](boundary.md) is unchanged: formats/decoders belong to lmz;
+machine probing, routing, transport and adapters belong here; residency policy
+and application behavior do not become transport features.
+
+### Current baseline — do not rebuild already implemented phases
+
+- `load_file`, streaming, opt-in cache creation, the standard-codec adapter,
+  PyTorch/vLLM integration, object-storage sources/uploads and encryption are
+  implemented. Their presence is not proof of every deployment mode.
+- Cloud validation records real anonymous reads and signing fixtures/local
+  tests; signed requests against real stores remain unverified in the current
+  record. Do not advertise a validated production cloud deployment on that basis.
+- `Model.stream()` currently follows file order, not consumer execution order.
+  Its budget is a window target: an oversized tensor may exceed it, and retained
+  consumer outputs also count toward application memory.
+- The CUDA torch adapter can need alignment copies. Measure the complete peak,
+  including temporary allocations; neither streaming nor zero-copy terminology
+  establishes a strict application memory ceiling.
+- Transport speedups and savings are conditional on model, codec, CPU, device,
+  link and cache state. Plain-file wins and compressed-route losses are valid
+  outcomes. Older workstation numbers are evidence about that setup, not
+  constants for low-cost or unified-memory machines.
+
+### Multimodal first unit — MM-SLUICE-01
+
+**Planning status:** this repository-local direction is updated; it does not
+claim that new implementation work has started. The main released checkout and
+the separate `codex/portable-device-readiness` worktree are different baselines.
+The latter's reported `809a7172f03288e4fe9496545d3f35a66cb5ed65` work includes
+readiness/resource reporting and cache/failure mechanisms. Its 145,012-byte
+synthetic artifact and modality labels are not trained ASR/vision inference.
+Its technical results do not settle the still-inconclusive A/B product claims.
+The project owner must reconcile the accepted development baseline; this plan
+does not merge it into master or restart its completed campaign.
+
+The next bounded development unit is **complete bundle delivery plus an optional
+consumer lifecycle adapter**, retaining tensor APIs and plain/no-lmz use:
+
+1. Resolve a bundle identity comprising graph, external weights and necessary
+   config/preprocessing/vocabulary/calibration assets. Use a format-neutral
+   delivery description and optional codec/provider interface; lmz parses its
+   coded format. Do not copy coded-stream parsing into transport.
+2. Materialize complete verified generations into owned staging directories.
+   Test missing/truncated/corrupt assets, unsafe paths/links/path races, invalid
+   offsets, stale cache generations and cleanup. Cache stat identity is not
+   publisher authentication or proof against hostile content mutation.
+3. Reuse accepted readiness/resource instrumentation. Distinguish resolve,
+   fetch, reconstruct/materialize, consumer session initialization, first
+   **valid** output and release. First tensor availability is not inference
+   readiness. Attribute transport staging and engine/activation memory separately.
+4. Add one optional ONNX Runtime CPU consumer boundary, with isolated imports
+   and caller-supplied input/output validation. Record graph/operator/backend
+   compatibility. Keep the core importable without that engine or lmz; no
+   mandatory inference framework or multi-backend expansion in this unit.
+5. Document and test transport-owned resource limits and cooperative cancellation
+   points. Runtime owns sensor buffers, eviction, temporal state and deadlines.
+   Do not claim hard whole-process limits, arbitrary backend preemption, free
+   compressed-initializer I/O binding or durable resume without implementation.
+6. Compare tiny generated graphs through normal loading and lmsluice plain;
+   include the accepted lmz route when available. An unavailable provider is
+   NOT_RUN, not a different codec silently labeled as lmz.
+
+**Exit:** additive API/schema compatibility, complete artifact identity,
+malformed-input rejection and cleanup, correct lifecycle event ordering,
+plain/no-optional-dependency regression coverage and an available engine's
+validated golden output. Record optional unavailable arms explicitly in
+`docs/evaluations/multimodal-consumer.md`; this does not pass real-model quality.
+
+After completion/review and a new ready-executor handover, the first actual
+consumer gate is trained ASR plus vision on fixed approved inputs. Hold graph,
+weights, preprocessing and backend constant across normal/plain/coded routes;
+check transcripts/vision outputs and task metrics, initialization/first-useful
+latency, memory and contention. Then add TTS/reasoning and passive spatial state.
+Live audio/video/IMU streaming is runtime work, not a new weight-transport API.
+No real models, target campaign or dependency installation are launched by this
+plan update. Parent YFCE coordination is `docs/multimodal-development-plan.md`.
+
+### Track A next work: SLUICE-A1 — cheaper-system viability
+
+**Question:** does transport make a less expensive hardware configuration meet
+the same broad application requirements, or does it only improve loading time
+on hardware we already need?
+
+1. Define a fixed deployment workload and application capability/latency
+   baseline before comparing routes. Include language, speech and vision
+   artifacts in their actual serving forms, including quantized forms. Share
+   the manifest with lmz's affordability assessment where useful; do not wait
+   for a niche selection or require a new archive to begin plain-file tests.
+2. Compare the application's normal loader, lmsluice plain transport, and
+   supported coded routes on identical artifact bytes. Separate transport,
+   caching, codec and device-decode effects rather than attributing their
+   combined improvement to compression. Include a no-benefit/fast-storage
+   control and truthful cold/warm conditions.
+3. Measure time to the application's first useful work and total readiness,
+   alongside load time, transferred/stored bytes, peak host/device memory,
+   CPU use and resource contention. A first tensor is only a diagnostic, not
+   proof the application can run. Collect repeated-run median/tail results,
+   with sample counts; mark energy unmeasured if no reliable measurement exists.
+4. Exercise low-memory and slow-link cases plus the CPU-only path. Measure
+   unified-memory and other target hosts where accessible. Workstation
+   throttling/resource limits are useful simulations, not substitutes for a
+   measured low-cost CPU. Record hardware, decoder capability, cache state and
+   the parameters behind every projection.
+5. Test the known memory-budget edges: a tensor larger than the requested
+   window, outputs retained by the consumer, and alignment-induced device
+   copies. Record actual application high-water memory. Do not promise a hard
+   budget or a smaller RAM SKU until that path and workload demonstrate it.
+6. Classify the result as BOM reduction, faster startup, resource headroom,
+   transfer/operating savings, or no benefit. A cheaper-system claim needs a
+   named configuration, dated cost/volume assumptions and unchanged application
+   acceptance. Include required hosts and services; do not shift cost off the
+   endpoint and omit it from the comparison. Loading-memory savings do not
+   imply reduced steady-state model residency.
+
+**Acceptance:** write `docs/evaluations/affordability.md` with the frozen
+workload, baseline/SLA, the required saved and Git-delivered probe when
+user-operated, linked raw results,
+route decisions, byte/output-equivalence checks, prediction errors and all
+negative/inconclusive cases. Report the supportable envelope, not a universal
+win. A smaller bill of materials is a possible finding, not a promised result.
+
+**Engineering selection:** use the measured bottleneck to choose the next
+bounded change. Candidates include budget accounting/enforcement, consumer-order
+delivery, staging/copy reduction or a missing readiness metric. None is selected
+merely by being on this list; preserve cheap/no-CUDA operation and allow the
+plain route to win.
+
+### Track B next work: SLUICE-B1 — specialized deployment value
+
+**Question:** where are predictable model availability, deployment access or
+loading behavior valuable enough to justify adoption, independently of price?
+
+1. Compare at least two candidate workflows before choosing a first lane:
+   restricted/private model distribution, bandwidth-constrained device fleets,
+   and deployments switching among specialized models are hypotheses. Record
+   user/buyer, trigger frequency, current alternative, source/destination,
+   integration burden and access to a representative consumer. Do not designate
+   a repair bench or any other niche as already selected.
+2. For an accessible candidate, reproduce its actual loading/distribution path
+   with the existing interfaces. Measure workflow readiness/downtime, tail
+   behavior, bytes, resource use and recovery behavior relevant to that consumer.
+   Benchmark the real alternative, including its caching/deduplication, not
+   only an artificially weak sequential download.
+3. Record security/operating requirements separately from features implemented:
+   authentication, integrity, encryption, connectivity and failed/interrupted
+   transfers as applicable. A transport with encryption and range reads is not
+   a fleet manager or a complete atomic-update/rollback system. Do not imply
+   those guarantees without an owning integration and validation.
+4. Add an adapter or reliability feature only after identifying a concrete
+   consumer and the smallest blocking gap. Codec work stays in lmz; application
+   authorization, fleet policy and runtime residency stay with their owners.
+   Real authenticated-store validation uses a user-authorized test target;
+   credentials, customer contact and external writes are not implicit here.
+5. Assess repeatable customer value and deployment/support effort independently
+   of Track A. A premium deployment may pass B while A fails. If customer access
+   is absent, distinguish technical feasibility from unvalidated demand rather
+   than selecting a market from a benchmark alone.
+
+**Acceptance:** write separate `docs/evaluations/niche.md` with the candidate
+comparison, one accessible workflow's evidence (or a named access blocker),
+baseline, reproducible results, negative/failed probes, integration cost and
+customer evidence or its absence. Record pursue/defer/reject per candidate;
+do not claim production readiness from fixtures or a local proxy alone.
+
+### Next-cycle ordering and validation
+
+1. Audit current implementation against the baseline above; do not restart
+   historical phases such as adding `load_file` or object-storage support.
+   Reuse the accepted readiness work and apply MM-SLUICE-01 to the actual bundle/
+   consumer gap; retain its earlier synthetic results as dated mechanism evidence.
+2. Define A1's workload and B1's candidates independently. Either track may
+   proceed while the other's hardware/customer evidence is unavailable; a
+   scheduling order is not a dependency or approval condition.
+3. Run existing paths first. For a blocking instrumentation or implementation
+   gap, identify its owner, reproducer, bounded change and validation. Continue
+   necessary correctness/compatibility work regardless of strategy outcomes.
+4. Evaluate A and B separately and use their evidence to select the next
+   engineering increment. Codec work may share interfaces and fixtures with
+   lmz without making either product dependent on a device launch.
+
+Changes arising from either track require focused regression tests plus the
+relevant existing suite: byte-identical delivery, appropriate inference-output
+checks, plain/no-lmz operation, supported fallback behavior and memory/failure
+cases touched by the change. Record measured, projected, failed and unavailable
+results distinctly. Follow the user's existing environment/network rules;
+prefer local artifacts and do not turn this roadmap into permission for large
+downloads, purchases, unrelated execution or outreach. This update changes the
+next development direction; no evaluation campaign has been run by writing it.
+
+Any user-operated validation uses the installed all-in-one-probe skill: actual
+no-argument tracked `.sh`, approved tracked inputs, internal setup/execution/
+logging/collection, scoped publication to the established task Git remote and
+branch, verified clean-checkout acquisition and exact remote commit/tree, and
+the owning executor's completion-checker preflight. No detached setup, manual
+downloads/copies, unpublished required payload or pasted script substitute.
+Finish prior accepted tasks and final reporting before a new implementation
+handover; document updates do not themselves dispatch a workflow.
 
 ## 1. The one fact that should decide the roadmap
 
@@ -296,6 +536,9 @@ storage** is the shortest path from correct to used, and it comes before the
 phases below.
 
 ## 5. Roadmap
+
+Historical phase record. Section 0 is the current plan; reconcile these older
+status labels with the implementation before accepting any item as new work.
 
 ### Phase A0 — a codec that needs nothing installed *(§4b)*
 

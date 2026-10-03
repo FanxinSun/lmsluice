@@ -1,5 +1,12 @@
 # The transport runtime — what was built, measured, and got wrong
 
+> **Historical handover — 2026-10-03:** this session snapshot, test counts,
+> uncommitted-state descriptions and proposed next actions are **retired as
+> current status or execution authority**, not erased evidence. Accepted later
+> readiness/cache and bundle work is recorded in [the intake](handover-intake.md).
+> Remaining engineering obligations map to [the canonical master](../plan/PLAN.md),
+> especially SLUICE-CORRECTNESS-0, SLUICE-USE-0 and held SLUICE-OPT-0.
+
 *The whole of the session that turned `lmsluice/` from a README and a probe
 into something that runs: what each piece is, why it is shaped that way, the
 numbers it produced and the conditions they hold under, two corrections that

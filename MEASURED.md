@@ -1,5 +1,13 @@
 # Measured — the box these numbers came from
 
+> **Reading/status note — 2026-10-03:** this is a chronological evidence record,
+> not an execution plan. Earlier figures and conclusions explicitly corrected
+> later in this file are **retired**; read their conditions and retirement table
+> before quoting them. WSL cold-cache uncertainty and the measured Mac plain win
+> remain important limits. Suggestions for future work are not active assignments;
+> use [the canonical plan](plan/PLAN.md) and [current intake](docs/handover-intake.md).
+> None of these historical results was rerun in this documentation intake.
+
 *Conditions first, because two of the figures below moved by more than 2×
 when a BIOS setting changed, and a bandwidth number without its memory clock
 is not a measurement.*

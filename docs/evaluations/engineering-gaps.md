@@ -1,5 +1,12 @@
 # Engineering fixes and remaining gaps
 
+> **Current interpretation — 2026-10-03:** the following is the retained
+> readiness/cache campaign record. Later MM-SLUICE-01 adds accepted generated
+> bundle/lifecycle mechanics and separate actual-lmz interoperability, not real
+> inference quality. Its remaining-gap suggestions are not an execution order;
+> use SLUICE-CORRECTNESS-0 / SLUICE-USE-0 / SLUICE-OPT-0 in
+> [the master](../../plan/PLAN.md) and [the intake](../handover-intake.md).
+
 The correction campaign is identified by the exact source commit in its
 `manifest.json`; the tracked [`final-evidence.json`](final-evidence.json)
 resolves that commit in a Git archive. It completes with engineering status

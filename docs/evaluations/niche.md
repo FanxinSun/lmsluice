@@ -1,5 +1,11 @@
 # SLUICE-B1 specialized deployment evaluation
 
+> **Intake status — 2026-10-03:** local technical workflows are accepted; buyer,
+> deployment and specialist value remain INCONCLUSIVE/UNAVAILABLE. This record
+> does not dispatch its suggested next brief. SLUICE-B1 in
+> [the master](../../plan/PLAN.md) remains independent of A1; see
+> [the intake](../handover-intake.md) for accepted evidence and held work.
+
 B1 is independent of the affordability evaluation. It compares deployment
 workflows and records technical, integration and evidence limits. The current
 correction campaign is identified by the exact `source_commit` in
