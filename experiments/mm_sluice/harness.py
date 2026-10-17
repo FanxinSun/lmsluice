@@ -1131,10 +1131,10 @@ def run_stdlib_core_check(campaign):
 
 
 def run_campaign(out, *, repo_root=None, regression=True, lmz_root=None):
-    out = os.path.abspath(out)
+    out = os.path.realpath(os.path.abspath(out))
     os.makedirs(out, exist_ok=True)
-    repo_root = os.path.abspath(repo_root or os.path.join(
-        os.path.dirname(__file__), "..", ".."))
+    repo_root = os.path.realpath(os.path.abspath(repo_root or os.path.join(
+        os.path.dirname(__file__), "..", "..")))
     fixture_root = os.path.join(out, "fixtures")
     bundle = generate_bundle(fixture_root)
     capabilities = _capabilities(repo_root, bundle)

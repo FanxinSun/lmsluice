@@ -49,6 +49,7 @@ DRIVE_PATH = re.compile(r"^[A-Za-z]:")
 COPY_CHUNK = 1 << 20
 AT_FDCWD = -100
 RENAME_NOREPLACE = 1
+DARWIN_RENAME_EXCL = 0x00000004
 
 
 def _entry_id(path: str) -> str:
@@ -2437,14 +2438,23 @@ def _atomic_publish_fd_no_replace(parent_fd: int, stage_name: str, name: str,
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is None:
-            raise BundleError("atomic no-replace publication is unavailable",
-                              code="atomic_publish_unavailable")
-        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
-                              ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(parent_fd, os.fsencode(stage_name), parent_fd,
-                           os.fsencode(name), RENAME_NOREPLACE)
+        if renameat2 is not None:
+            renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                  ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            renameat2.restype = ctypes.c_int
+            result = renameat2(parent_fd, os.fsencode(stage_name), parent_fd,
+                               os.fsencode(name), RENAME_NOREPLACE)
+        else:
+            renameatx_np = getattr(libc, "renameatx_np", None)
+            if renameatx_np is not None:
+                renameatx_np.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                         ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                renameatx_np.restype = ctypes.c_int
+                result = renameatx_np(parent_fd, os.fsencode(stage_name), parent_fd,
+                                      os.fsencode(name), DARWIN_RENAME_EXCL)
+            else:
+                raise BundleError("atomic no-replace publication is unavailable",
+                                  code="atomic_publish_unavailable")
         if result != 0:
             error_no = ctypes.get_errno()
             if error_no == errno.EEXIST:
@@ -2465,10 +2475,11 @@ def _atomic_publish_fd_no_replace(parent_fd: int, stage_name: str, name: str,
 def _atomic_publish_no_replace(stage: str, parent: str, name: str):
     """Publish a same-filesystem directory atomically without replacement.
 
-    Linux/WSL exposes ``renameat2(RENAME_NOREPLACE)`` through libc.  A plain
-    ``os.rename`` is deliberately not used because it can replace a directory
-    that appeared after the preflight check.  Platforms without this primitive
-    fail closed instead of weakening the destination ownership guarantee.
+    Linux/WSL exposes ``renameat2(RENAME_NOREPLACE)`` through libc, and Darwin/macOS
+    exposes ``renameatx_np(RENAME_EXCL)``. A plain ``os.rename`` is deliberately
+    not used because it can replace a directory that appeared after the preflight check.
+    Platforms without this primitive fail closed instead of weakening the destination
+    ownership guarantee.
     """
     expected = _stat_token(os.lstat(parent))
     parent_fd, _ = _open_stable_directory(parent, "destination parent", expected=expected)

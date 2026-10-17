@@ -18,7 +18,7 @@ from lmsluice.onnxruntime_adapter import OnnxCPUConsumer, capability
 
 class TestBundle(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.mkdtemp(prefix="lmsluice-mm-bundle-test-")
+        self.directory = os.path.realpath(tempfile.mkdtemp(prefix="lmsluice-mm-bundle-test-"))
         self.fixture = generate_bundle(self.directory)
 
     def tearDown(self):
@@ -263,7 +263,7 @@ class TestBundle(unittest.TestCase):
         # Restore the manifest-declared file by regenerating the fixture in a
         # fresh source, then exercise the ceiling independently.
         shutil.rmtree(self.directory)
-        self.directory = tempfile.mkdtemp(prefix="lmsluice-mm-bundle-test-")
+        self.directory = os.path.realpath(tempfile.mkdtemp(prefix="lmsluice-mm-bundle-test-"))
         self.fixture = generate_bundle(self.directory)
         with self.assertRaises(B.BundleError) as context:
             B.materialize_bundle(self.fixture["source_root"], self._destination(),

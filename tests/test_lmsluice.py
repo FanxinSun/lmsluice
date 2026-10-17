@@ -440,6 +440,7 @@ class _serve:
     def __exit__(self, *_exc):
         self.srv.shutdown()
         self.srv.server_close()
+        self.thread.join(timeout=2.0)
 
 
 class _fake_store:
@@ -663,6 +664,7 @@ class _fake_store:
     def __exit__(self, *_exc):
         self.srv.shutdown()
         self.srv.server_close()
+        self.thread.join(timeout=2.0)
 
 
 # -- the loader, both routes ----------------------------------------------
@@ -1782,7 +1784,8 @@ class TestBoundary(unittest.TestCase):
         root = os.path.dirname(self.PACKAGE)
         doc = os.path.join(root, "docs", "boundary.md")
         self.assertTrue(os.path.exists(doc))
-        text = open(doc).read()
+        with open(doc, encoding="utf-8") as fh:
+            text = fh.read()
         for required in ("three-question test", "loan register",
                          "I1", "I5", "compressor/decompressor",
                          "transport facilitator"):
@@ -2005,7 +2008,8 @@ class TestDestinationBuffer(unittest.TestCase):
                             for l in fh)
         from lmsluice import buffer as _b
 
-        source = open(_b.__file__).read()
+        with open(_b.__file__, encoding="utf-8") as fh:
+            source = fh.read()
         self.assertIn("MAP_PRIVATE", source,
                       "a shared mapping is never backed by transparent huge "
                       "pages, whatever the kernel has free")

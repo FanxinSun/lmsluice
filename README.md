@@ -6,8 +6,8 @@ decides by measurement rather than assumption, and it says what it decided and
 on what numbers. Pure standard library, and nothing about the bytes changes:
 every weight arrives byte-identical.
 
-> **Current status — 2026-10-03:** use the [canonical plan](plan/PLAN.md) and
-> [handover intake](docs/handover-intake.md). Bundle delivery and optional-lmz
+> **Current status — 2026-10-03:** use the [canonical plan](plan/PLAN.md),
+> [handover intake](docs/handover-intake.md) and [ownership boundary](docs/boundary.md). Bundle delivery and optional-lmz
 > mechanics are accepted; real model quality, target readiness, affordability
 > and niche value remain open. The following older development-priority pointer
 > is **retired as plan authority** and retained as historical wording.

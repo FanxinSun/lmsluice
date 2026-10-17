@@ -295,6 +295,8 @@ class HttpSource(Source):
         self._signer = signer
         self.range_header = range_header
         self._local = threading.local()
+        self._conns: list[http.client.HTTPConnection] = []
+        self._conns_lock = threading.Lock()
         self.size, self.random_access = self._head()
 
     def _sign(self, method: str, extra: dict | None = None) -> dict:
@@ -375,6 +377,8 @@ class HttpSource(Source):
             self._local.conn = conn
             self._local.path = urllib.parse.urlunparse(
                 ("", "", p.path or "/", p.params, p.query, ""))
+            with self._conns_lock:
+                self._conns.append(conn)
         return conn
 
     def _drop(self) -> None:
@@ -418,6 +422,14 @@ class HttpSource(Source):
 
     def close(self) -> None:
         self._drop()
+        with self._conns_lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 class CachedSource(Source):
