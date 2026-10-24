@@ -40,6 +40,9 @@ windows instead.
 
 from __future__ import annotations
 
+import json
+import os
+
 from .model import open_model
 
 # safetensors' dtype names, which is what the tensor index carries, against the
@@ -95,21 +98,51 @@ def _shape(t) -> tuple:
     return tuple(t.shape) if t.shape else ()
 
 
-def load_file(filename, device="cpu"):
+def load_file(filename, device="cpu", *, prefer: str | None = None,
+              cache: str = "auto", observer=None):
     """Load a checkpoint into torch tensors. `safetensors.torch.load_file`'s call.
 
-    Takes a plain `.safetensors` file or an lmsluice/lmz archive and decides
-    between them the way every other load here does -- through `plan.py`,
-    against the machine's own measured rates. On a fast NVMe with an archive
-    that does not pay, the plan says so and the read is still correct; the
-    decision is about speed, never about the bytes.
+    Takes a plain `.safetensors` file, an lmsluice/lmz archive, a sharded index
+    (`model.safetensors.index.json`), or a model directory. Coordinates multi-shard
+    loads transparently into a single unified state_dict.
 
-    `device` accepts what safetensors accepts: `"cpu"`, `"cuda"`, `"cuda:1"`, or
-    a `torch.device`.
+    `device` accepts `"cpu"`, `"cuda"`, `"cuda:1"`, `"mps"`, or a `torch.device`.
     """
     torch = _torch()
     dev = device if isinstance(device, torch.device) else torch.device(device)
-    m = open_model(str(filename))
+    target_str = str(filename)
+
+    from .model import is_sharded
+
+    if is_sharded(target_str):
+        if os.path.isdir(target_str):
+            model_dir = os.path.abspath(target_str)
+            index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        else:
+            index_path = os.path.abspath(target_str)
+            model_dir = os.path.dirname(index_path)
+
+        with open(index_path, "r", encoding="utf-8") as f:
+            index_data = json.load(f)
+        shard_names = sorted(set(index_data.get("weight_map", {}).values()))
+        state_dict = {}
+        for shard_name in shard_names:
+            shard_path = os.path.join(model_dir, shard_name)
+            shard_dict = load_file(shard_path, device=device, prefer=prefer,
+                                   cache=cache, observer=observer)
+            state_dict.update(shard_dict)
+        return state_dict
+
+    if os.path.isdir(target_str):
+        try:
+            st_files = [f for f in os.listdir(target_str) if f.endswith(".safetensors")]
+            if len(st_files) == 1:
+                return load_file(os.path.join(target_str, st_files[0]), device=device,
+                                 prefer=prefer, cache=cache, observer=observer)
+        except OSError:
+            pass
+
+    m = open_model(str(filename), prefer=prefer, cache=cache, observer=observer)
     try:
         if dev.type == "cpu":
             # Deliberately not closed: on the mapped route the tensors are
@@ -123,16 +156,26 @@ def load_file(filename, device="cpu"):
             out = _cuda(m, torch, dev)
             m.close()          # the bytes are in VRAM; the file is finished with
             return out
+        if dev.type == "mps":
+            if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+                raise ValueError(
+                    f"device 'mps' was requested but Apple Silicon Metal Performance Shaders (MPS) "
+                    f"is not available on this machine/PyTorch build.")
+            out = _mps(m, torch, dev)
+            m.close()
+            return out
         raise ValueError(
             f"device {dev.type!r} is not one this adapter can fill. It moves "
-            f"bytes to host memory or to CUDA; anything else is a copy the "
-            f"caller can make from the CPU result.")
+            f"bytes to host memory, CUDA, or Apple Silicon MPS; anything else is a "
+            f"copy the caller can make from the CPU result.")
     except BaseException:
         m.close()
         raise
 
 
-def stream_tensors(filename, *, budget: int | None = None):
+def stream_tensors(filename, *, device="cpu", budget: int | None = None,
+                   prefer: str | None = None, cache: str = "auto",
+                   observer=None):
     """Yield `(name, tensor)` a window at a time, holding a bounded amount.
 
     `load_file` materialises a whole checkpoint, which is what safetensors does
@@ -149,23 +192,96 @@ def stream_tensors(filename, *, budget: int | None = None):
     holds more than one window.
     """
     torch = _torch()
-    m = open_model(str(filename))
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+    target_str = str(filename)
+
+    from .model import is_sharded
+
+    if is_sharded(target_str):
+        if os.path.isdir(target_str):
+            model_dir = os.path.abspath(target_str)
+            index_path = os.path.join(model_dir, "model.safetensors.index.json")
+        else:
+            index_path = os.path.abspath(target_str)
+            model_dir = os.path.dirname(index_path)
+
+        with open(index_path, "r", encoding="utf-8") as f:
+            index_data = json.load(f)
+        shard_names = sorted(set(index_data.get("weight_map", {}).values()))
+        for shard_name in shard_names:
+            shard_path = os.path.join(model_dir, shard_name)
+            yield from stream_tensors(shard_path, device=device, budget=budget,
+                                      prefer=prefer, cache=cache, observer=observer)
+        return
+
+    m = open_model(str(filename), prefer=prefer, cache=cache, observer=observer)
     try:
         kw = {} if budget is None else {"budget": budget}
         for name, mv in m.stream(**kw):
             t = m.tensors[name]
             dt = _dtype(torch, t.dtype, name)
             if t.nbytes == 0:
-                yield name, torch.empty(_shape(t), dtype=dt)
+                ten = torch.empty(_shape(t), dtype=dt)
+                if dev.type != "cpu":
+                    ten = ten.to(dev)
+                yield name, ten
                 continue
             ten = torch.frombuffer(mv, dtype=dt).reshape(_shape(t))
             # The slice is what keeps the window alive; naming it here means a
             # consumer that keeps the tensor keeps its bytes, and one that does
             # not lets the window go at the next iteration.
             ten._lmsluice_keepalive = mv
+            if dev.type != "cpu":
+                ten = ten.to(dev)
             yield name, ten
     finally:
         m.close()
+
+
+def load_model(model_dir: str, device="cpu", *, dtype=None, config=None,
+               prefer: str | None = None, cache: str = "auto", observer=None, **kwargs):
+    """Load an instantiated Hugging Face model with zero-copy lmsluice weights.
+
+    Coordinates multi-shard state_dict loading via lmsluice and passes it to the
+    model class via `cls.from_pretrained(None, state_dict=state_dict, config=config, device_map=device)`.
+    """
+    torch = _torch()
+    try:
+        import transformers
+    except ImportError as exc:
+        raise ImportError("load_model requires the 'transformers' package: pip install transformers") from exc
+
+    dev = device if isinstance(device, torch.device) else torch.device(device)
+    if config is None:
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+
+    arch = getattr(config, "architectures", ["AutoModelForCausalLM"])[0]
+    cls = getattr(transformers, arch, getattr(transformers, "AutoModelForCausalLM", None))
+    if cls is None:
+        cls = transformers.AutoModelForCausalLM
+
+    state_dict = load_file(model_dir, device="cpu", prefer=prefer, cache=cache, observer=observer)
+    target_dtype = dtype or getattr(config, "torch_dtype", None) or torch.bfloat16
+    dev_str = str(dev)
+
+    model = cls.from_pretrained(
+        None,
+        state_dict=state_dict,
+        config=config,
+        dtype=target_dtype,
+        device_map=dev_str if dev.type in ("mps", "cuda") else None,
+        **kwargs,
+    )
+    if dev.type == "cpu" and hasattr(model, "to"):
+        model.to("cpu")
+    model.eval()
+    return model
+
+
+def _mps(m, torch, dev) -> dict:
+    """Tensors transferred to Apple Silicon Metal Performance Shaders (MPS)."""
+    host_tensors = _host(m, torch)
+    return {name: t.to(dev) for name, t in host_tensors.items()}
 
 
 def _host(m, torch, prefer_map: bool = True) -> dict:

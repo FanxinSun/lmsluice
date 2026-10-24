@@ -651,8 +651,122 @@ class Model:
         self.close()
 
 
-def open_model(target: str, **kw) -> Model:
-    """Open a model from a path, a URL, or an lmz archive of either."""
+def is_sharded(target: str) -> bool:
+    """Whether target points to a sharded model directory or index file."""
+    try:
+        t_str = str(target)
+        if os.path.isfile(t_str) and t_str.endswith(".index.json"):
+            return True
+        if os.path.isdir(t_str):
+            if os.path.isfile(os.path.join(t_str, "model.safetensors.index.json")):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+class ShardedModel:
+    """A multi-shard model presenting the unified Model interface.
+
+    Transparently coordinates across multi-shard safetensors models
+    (such as modern Hugging Face models split across model-00001-of-00003, etc.).
+    """
+
+    def __init__(self, target: str, *, profile: Profile | None = None,
+                 prefer: str | None = None, cache: str = "auto", observer=None, **kw):
+        self.target = str(target)
+        self.observer = observer
+        self.profile = profile if profile is not None else Profile.load()
+        self.prefer = prefer
+        self.cache = cache
+        self.kw = kw
+
+        if os.path.isdir(self.target):
+            self.model_dir = os.path.abspath(self.target)
+            self.index_path = os.path.join(self.model_dir, "model.safetensors.index.json")
+        else:
+            self.index_path = os.path.abspath(self.target)
+            self.model_dir = os.path.dirname(self.index_path)
+
+        with open(self.index_path, "r", encoding="utf-8") as f:
+            self.index_data = json.load(f)
+
+        self.weight_map: dict[str, str] = self.index_data.get("weight_map", {})
+        self.metadata: dict = self.index_data.get("metadata", {})
+
+        # Unique shard filenames
+        self.shard_names = sorted(set(self.weight_map.values()))
+        self._shard_models: dict[str, Model] = {}
+
+        # Populate unified tensors dictionary
+        self.tensors = {}
+        self.plain_bytes = 0
+        self.coded_bytes = 0
+
+        for shard_name in self.shard_names:
+            m = self._get_shard(shard_name)
+            self.plain_bytes += m.plain_bytes
+            self.coded_bytes += m.coded_bytes
+            for t_name, t in m.tensors.items():
+                self.tensors[t_name] = t
+
+        self.route = "sharded"
+
+    def _get_shard(self, shard_name: str) -> Model:
+        if shard_name not in self._shard_models:
+            shard_path = os.path.join(self.model_dir, shard_name)
+            self._shard_models[shard_name] = Model(
+                shard_path, profile=self.profile, prefer=self.prefer,
+                cache=self.cache, observer=self.observer, **self.kw
+            )
+        return self._shard_models[shard_name]
+
+    def tensor(self, name: str, buffer=None) -> memoryview:
+        if name not in self.weight_map:
+            raise KeyError(f"tensor {name!r} not found in model index")
+        shard_name = self.weight_map[name]
+        return self._get_shard(shard_name).tensor(name, buffer=buffer)
+
+    def stream(self, budget: int = STREAM_BUDGET):
+        for shard_name in self.shard_names:
+            m = self._get_shard(shard_name)
+            yield from m.stream(budget=budget)
+
+    @property
+    def ratio(self) -> float:
+        return self.coded_bytes / self.plain_bytes if self.plain_bytes else 1.0
+
+    @property
+    def encrypted(self) -> dict | None:
+        for m in self._shard_models.values():
+            if m.encrypted is not None:
+                return m.encrypted
+        return None
+
+    def close(self) -> None:
+        for m in self._shard_models.values():
+            m.close()
+        self._shard_models.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
+
+def open_model(target: str, **kw):
+    """Open a model from a path, a URL, an archive, a sharded index, or a model directory."""
+    target_str = str(target)
+    if is_sharded(target_str):
+        return ShardedModel(target_str, **kw)
+    if os.path.isdir(target_str):
+        try:
+            st_files = [f for f in os.listdir(target_str) if f.endswith(".safetensors")]
+            if len(st_files) == 1:
+                return Model(os.path.join(target_str, st_files[0]), **kw)
+        except OSError:
+            pass
     return Model(target, **kw)
 
 

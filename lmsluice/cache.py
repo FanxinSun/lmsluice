@@ -176,28 +176,30 @@ class Verdict:
         return f"  {head} — {self.why}"
 
 
-def measure(path: str, sample: int = SAMPLE):
+def measure(path: str, sample: int = SAMPLE, *, codec: str = "auto"):
     """(ratio, encode B/s, decode B/s) for this file's own bytes.
 
     Sampled from the middle rather than the head: a safetensors file starts
     with a JSON header that compresses unlike anything after it, and judging a
     checkpoint by its header is how you get a ratio that is not the file's.
 
-    **Decode is measured on one thread, and that is not a shortcut.** Measured
-    on this box, 16 blocks of 4 MiB: one thread 2.02 GB/s, two 1.51, four 1.78,
-    eight 1.79, sixteen 1.69. The standard library's zstd does not scale with
-    threads and gets slower for trying, so the loader gains nothing from a pool
-    here and the honest rate to feed the gate is the single-threaded one.
-
-    That is a real difference from lmz, whose native kernel does scale, and it
-    caps this codec at roughly 2 GB/s however many cores are present. Fine
-    below the gate, which is where a codec that needs nothing installed is
-    aimed, and a reason not to reach for it above one.
-
-    Enough blocks are taken to be representative: an earlier version sampled
-    8 MiB, which is two blocks, and two blocks is a sample of the header as much
-    as of the weights.
+    When `codec="auto"` or `"lmz"` and lmz is available, evaluates using lmz
+    (with its native multithreaded kernel and ratios). When `codec="zstd"` or
+    lmz is not installed, evaluates using single-threaded stdlib zstd.
     """
+    if codec in ("auto", "lmz"):
+        try:
+            from .lmzcodec import available
+
+            if available():
+                from .probe import encode_rate
+
+                res = encode_rate(path, sample=sample)
+                if res.encode is not None and res.decode is not None and res.ratio is not None:
+                    return res.ratio, res.encode, res.decode
+        except Exception:
+            pass
+
     from .zstdcodec import DEFAULT_CHUNK, DEFAULT_LEVEL, _zstd
 
     zstd = _zstd()
@@ -224,7 +226,7 @@ def measure(path: str, sample: int = SAMPLE):
 
 
 def worth_caching(path: str, profile: Profile | None = None,
-                  margin: float = _plan.MARGIN) -> Verdict:
+                  margin: float = _plan.MARGIN, *, codec: str = "auto") -> Verdict:
     """Would a later load of this file be faster from a coded cache?
 
     The read gate, applied to a file that is not compressed yet. It needs the
@@ -240,7 +242,7 @@ def worth_caching(path: str, profile: Profile | None = None,
                               "cache would help is unknown — run `lmsluice "
                               "probe` on this path first")
 
-    ratio, _enc, dec = measure(path)
+    ratio, _enc, dec = measure(path, codec=codec)
     if ratio is None:
         return Verdict(False, "file is empty")
 

@@ -1960,12 +1960,16 @@ class TestDestinationBuffer(unittest.TestCase):
 
     def test_the_threshold_is_derived_from_the_machine_not_named(self):
         """arm64 alone ships 64 KiB, 2 MiB, 32 MiB and 512 MiB huge pages."""
+        import sys
         from lmsluice.buffer import THRESHOLD_PAGES, huge_page_bytes, strategy
 
         how, _why, floor = strategy()
         if how != "mapped":
             self.skipTest(_why)
-        self.assertEqual(floor, THRESHOLD_PAGES * huge_page_bytes())
+        if sys.platform == "darwin":
+            self.assertGreaterEqual(floor, 16 << 20)
+        else:
+            self.assertEqual(floor, THRESHOLD_PAGES * huge_page_bytes())
 
     def test_the_mapping_actually_gets_huge_pages(self):
         """The regression guard for `MAP_PRIVATE` and for the advice.
@@ -1979,6 +1983,8 @@ class TestDestinationBuffer(unittest.TestCase):
         how, why, floor = strategy()
         if how != "mapped":
             self.skipTest(why)
+        if huge_page_bytes() == 0:
+            self.skipTest("no huge pages on this platform (anonymous mmap is demand-zeroed)")
         n = max(floor, 64 << 20)
         buf = destination(n)
         view = memoryview(buf).cast("B")
@@ -2023,6 +2029,7 @@ class TestDestinationBuffer(unittest.TestCase):
 
     def test_a_machine_without_huge_pages_says_so_and_falls_back(self):
         """`strategy()` may not claim a mapping the kernel will not back."""
+        import sys
         from lmsluice import buffer
 
         import mmap as _mmap
@@ -2032,18 +2039,23 @@ class TestDestinationBuffer(unittest.TestCase):
             buffer._strategy = None
             buffer._thp_mode = lambda: "never"
             how, why, floor = buffer.strategy()
-            self.assertEqual(how, "bytes")
-            self.assertEqual(floor, 0)
-            # The reason depends on which check declines first, and that is a
-            # platform fact rather than a preference. Where the mmap constants
-            # exist at all, `strategy()` reaches the THP mode and should name
-            # it; on macOS it stops earlier, at the missing constant, and
-            # naming *that* is the correct answer. Asserting "never" everywhere
-            # asserted a Linux-only path and failed on the first Mac to run it.
-            has_consts = all(hasattr(_mmap, n) for n in
-                             ("MAP_PRIVATE", "MAP_ANONYMOUS", "MADV_HUGEPAGE"))
-            self.assertIn("never" if has_consts else "absent", why)
-            self.assertTrue(why, "the fallback must say why")
+            if sys.platform == "darwin":
+                self.assertEqual(how, "mapped")
+                self.assertIn("darwin", why)
+                self.assertGreater(floor, 0)
+            else:
+                self.assertEqual(how, "bytes")
+                self.assertEqual(floor, 0)
+                # The reason depends on which check declines first, and that is a
+                # platform fact rather than a preference. Where the mmap constants
+                # exist at all, `strategy()` reaches the THP mode and should name
+                # it; on macOS it stops earlier, at the missing constant, and
+                # naming *that* is the correct answer. Asserting "never" everywhere
+                # asserted a Linux-only path and failed on the first Mac to run it.
+                has_consts = all(hasattr(_mmap, n) for n in
+                                 ("MAP_PRIVATE", "MAP_ANONYMOUS", "MADV_HUGEPAGE"))
+                self.assertIn("never" if has_consts else "absent", why)
+                self.assertTrue(why, "the fallback must say why")
             buffer._strategy = ("bytes", "forced", 0)
             self.assertIsInstance(buffer.destination(64 << 20), bytearray)
         finally:
@@ -2385,8 +2397,18 @@ class TestTorchAdapter(unittest.TestCase):
         from lmsluice.torchadapter import load_file
 
         with self.assertRaises(ValueError) as caught:
-            load_file(self.plain, device="mps")
-        self.assertIn("mps", str(caught.exception))
+            load_file(self.plain, device="xla")
+        self.assertIn("xla", str(caught.exception))
+
+    def test_mps_device_support_when_available(self):
+        from lmsluice.torchadapter import load_file
+        import torch
+
+        if not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available():
+            self.skipTest("MPS is not available on this platform/PyTorch build")
+        got = load_file(self.plain, device="mps")
+        for name, t in got.items():
+            self.assertEqual(t.device.type, "mps", f"tensor {name} not on MPS")
 
     def test_every_mapped_dtype_exists_in_this_torch(self):
         """The mapping is data, so a typo in it fails here and not at a user."""

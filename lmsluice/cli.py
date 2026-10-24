@@ -53,13 +53,15 @@ def cmd_probe(args) -> int:
     profile = probe_run(args.target, sample=args.sample, write=not args.no_write,
                         profile=Profile.load(args.profile))
     if args.encode and os.path.isfile(args.target):
-        rate, ratio = encode_rate(args.target, sample=args.sample)
-        if rate:
+        res = encode_rate(args.target, sample=args.sample)
+        if res.encode:
             codec = profile.codecs.get("lmz-cpu")
             profile.codecs["lmz-cpu"] = type(codec or _blank())(
                 **{**(codec.__dict__ if codec else _blank().__dict__),
-                   "encode": rate, "ratio": ratio if ratio else
-                   (codec.ratio if codec else None)})
+                   "encode": res.encode,
+                   "decode": res.decode if res.decode is not None else (codec.decode if codec else None),
+                   "threads": res.threads or (codec.threads if codec else 0),
+                   "ratio": res.ratio if res.ratio is not None else (codec.ratio if codec else None)})
     from .probe import decrypt_rate
 
     profile.decrypt = decrypt_rate()
@@ -386,7 +388,7 @@ def cmd_cache(args) -> int:
         print("cache: give a model, or --list / --clear", file=sys.stderr)
         return 1
 
-    v = cache.worth_caching(args.target, _profile(args))
+    v = cache.worth_caching(args.target, _profile(args), codec=args.codec)
     print(v.explain())
     if not args.build:
         if v.worth_it:

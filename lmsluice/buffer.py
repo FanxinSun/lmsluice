@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import mmap
 import os
+import sys
 
 # Below this the two are indistinguishable and the mapping is not worth a
 # syscall: measured on this box, parity to ~8 MB and 3.5-8x above 16 MB. Stated
@@ -84,6 +85,14 @@ def strategy() -> tuple[str, str, int]:
     global _strategy
     if _strategy is not None:
         return _strategy
+
+    if sys.platform == "darwin":
+        has_flags = hasattr(mmap, "MAP_PRIVATE") and (
+            hasattr(mmap, "MAP_ANONYMOUS") or hasattr(mmap, "MAP_ANON"))
+        if has_flags:
+            _strategy = ("mapped", "darwin anonymous mmap (demand-zeroed)", 16 << 20)
+            return _strategy
+
     need = ("MAP_PRIVATE", "MAP_ANONYMOUS", "MADV_HUGEPAGE")
     missing = [n for n in need if not hasattr(mmap, n)]
     if missing:
@@ -118,8 +127,13 @@ def destination(n: int):
     how, _why, floor = strategy()
     if how == "mapped" and n >= floor:
         try:
-            buf = mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-            buf.madvise(mmap.MADV_HUGEPAGE)
+            anon_flag = getattr(mmap, "MAP_ANONYMOUS", getattr(mmap, "MAP_ANON", 0))
+            buf = mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE | anon_flag)
+            if hasattr(mmap, "MADV_HUGEPAGE"):
+                try:
+                    buf.madvise(mmap.MADV_HUGEPAGE)
+                except (OSError, ValueError):
+                    pass
             return buf
         except (OSError, ValueError):
             pass          # out of address space, or a kernel that refuses: fall back

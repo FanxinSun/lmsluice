@@ -387,8 +387,39 @@ def pcie_rate(sample: int = 128 << 20, reps: int = 3) -> dict:
         ctx.close()
 
 
+class EncodeResult(tuple):
+    """(encode_rate, ratio) with optional decode and thread count attributes.
+
+    Unpacks as a 2-tuple for backwards compatibility with `rate, ratio = encode_rate(...)`,
+    while exposing `.decode` and `.threads` so callers have the measured decode rate.
+    """
+
+    def __new__(cls, encode: float | None, ratio: float | None,
+                decode: float | None = None, threads: int = 0):
+        obj = super().__new__(cls, (encode, ratio))
+        obj._decode = decode
+        obj._threads = threads
+        return obj
+
+    @property
+    def encode(self) -> float | None:
+        return self[0]
+
+    @property
+    def ratio(self) -> float | None:
+        return self[1]
+
+    @property
+    def decode(self) -> float | None:
+        return self._decode
+
+    @property
+    def threads(self) -> int:
+        return self._threads
+
+
 def encode_rate(plain_path: str, *, sample: int = SAMPLE,
-                directory: str | None = None) -> tuple[float | None, float | None]:
+                directory: str | None = None) -> EncodeResult:
     """(bytes per second, ratio) for compressing a sample of a plain file.
 
     Writing the sample out and compressing it is the only honest way to time
@@ -396,6 +427,9 @@ def encode_rate(plain_path: str, *, sample: int = SAMPLE,
     does. The coded output is written too, so this is encode plus a smaller
     write rather than encode alone -- which is the number the write plan wants
     anyway, and is noted here so it is not later quoted as the codec's own.
+
+    Decodes the compressed sample before unlinking to measure decode rate on
+    the exact same data and avoid leaving decode unknown in the plan.
     """
     from .lmzcodec import encoder
 
@@ -403,7 +437,7 @@ def encode_rate(plain_path: str, *, sample: int = SAMPLE,
     size = os.path.getsize(plain_path)
     sample = min(sample, size)
     if sample < (16 << 20):
-        return None, None
+        return EncodeResult(None, None)
     tmp = tempfile.mkdtemp(dir=directory, prefix=".lmsluice-probe-")
     try:
         src = os.path.join(tmp, "sample.bin")
@@ -426,7 +460,19 @@ def encode_rate(plain_path: str, *, sample: int = SAMPLE,
         encoder().encode(src, dst)
         elapsed = time.perf_counter() - started
         coded = os.path.getsize(dst)
-        return os.path.getsize(src) / elapsed, coded / os.path.getsize(src)
+        rate = os.path.getsize(src) / elapsed
+        ratio = coded / os.path.getsize(src)
+
+        dec_rate = None
+        dec_threads = 0
+        try:
+            dec_codec = decode_rate(dst, sample=sample)
+            dec_rate = dec_codec.decode
+            dec_threads = dec_codec.threads
+        except Exception:
+            pass
+
+        return EncodeResult(rate, ratio, decode=dec_rate, threads=dec_threads)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -451,7 +497,19 @@ def run(target: str, *, sample: int = SAMPLE, write: bool = True,
 
     if _is_archive(target):
         codec = decode_rate(target, sample=sample)
-        profile.codecs[codec.name] = codec
+        existing = profile.codecs.get(codec.name)
+        if existing:
+            profile.codecs[codec.name] = Codec(
+                name=codec.name,
+                decode=codec.decode if codec.decode is not None else existing.decode,
+                encode=codec.encode if codec.encode is not None else existing.encode,
+                threads=codec.threads or existing.threads,
+                archive=codec.archive or existing.archive,
+                ratio=codec.ratio if codec.ratio is not None else existing.ratio,
+                sample_bytes=codec.sample_bytes or existing.sample_bytes,
+            )
+        else:
+            profile.codecs[codec.name] = codec
 
     # The second link. Measured unconditionally where a device exists, because
     # it is a property of the machine rather than of the file, and a plan for a
