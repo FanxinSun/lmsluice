@@ -120,3 +120,45 @@ survives this measurement, and the floor stays a floor.
 **Cost:** hours, in the existing script's style — not a backend port. Which is
 the point: the parameter that decides the founding claim may be obtainable
 without one.
+
+
+## metal-bench.js (macOS)
+
+A zero-install Metal benchmark for macOS (`probe/metal-bench.js`), serving as the macOS counterpart to `igpu-bench.ps1`.
+It measures device facts across all enumerated Metal devices, DRAM streaming bandwidth, sustained FP32 FMA / int32 throughput, dependent threadgroup memory chains, and the occupancy staircase that independently cross-checks decoder grid sweeps.
+
+### Design and Zero-Install Constraints
+
+On a clean stock macOS installation, `/usr/bin/python3` triggers a Command Line Tools prompt, and developer toolkits (Xcode, `clang`, `xcrun`, `metal`, `swift`) are absent. `metal-bench.js` is written entirely in **JavaScript for Automation** (JXA, executed via `osascript -l JavaScript`):
+- **Runtime Shader Compilation:** Metal Shading Language (MSL) source strings are compiled dynamically on the target device via `device.newLibraryWithSourceOptionsError()`.
+- **Foreign Function Interface & Struct Bridging:** C and Objective-C APIs are bound without external wrappers. `MTLSize` structs are bridged using explicit 64-bit integer packing in `NSData` and dispatched via `NSInvocation`.
+- **Dynamic Clock & P-State Residency:** GPU operating frequencies are measured without `sudo` by dynamically loading `/usr/lib/libIOReport.dylib` via `$.dlopen` and binding `IOReportCopyChannelsInGroup` / `IOReportCreateSamplesDelta` for the `GPU Stats` / `GPUPH` channels, cross-referenced with `pmgr` voltage states.
+- **Stock Utility Confinement:** Operating system inspection is strictly confined to tools shipping with macOS (`ioreg`, `sysctl`, `sw_vers`, `pmset`, and `/usr/bin/perl` for memory contention tests).
+
+### Verification and Hygiene
+
+Every benchmark kernel implements bit-exact validation:
+- **Streaming Read:** Compares the GPU-reduced per-threadgroup sum against the exact closed-form analytical sum $\sum_{i=0}^{N-1} i \pmod{2^{32}}$.
+- **Copy:** Verifies sample words across memory buffers.
+- **FP32 FMA & Int32:** Mathematically models convergence and compares register chains against single-precision JS thread emulation.
+- **Dependent Chain & Staircase:** Emulates the pseudo-random permutation hops in JS and verifies the final state written by thread 0.
+- **GPU Lock:** Coordinates via atomic lockfile (`m4-gpu`) with background GPU workloads, logging foreign AGX user client time deltas from `ioreg`.
+
+### Calibration & Staircase Findings
+
+The occupancy staircase measures wave-period transitions by dispatching $G = 1 \dots (cores \times 24)$ threadgroups:
+- For the compiled direct kernel shape ($T = 128, S = 19,456$ B compiled static footprint), the curve displays a sharp step transition at $G = 40$ across 10 GPU cores, establishing **4 TGs per core**. This directly cross-checks and confirms the knee identified by the independent decoder grid sweep.
+- Per-core threadgroup memory allocation bounds are derived from clean step transitions: for the M4, $77,824 \le \text{pool} < 83,968$ B (likely $\approx 80$ KiB), accommodating $4 \times 19,456$ B and $2 \times 32,768$ B blocks per core at maximum group memory.
+
+### Usage
+
+```bash
+# Quick verification run (~15s)
+osascript -l JavaScript probe/metal-bench.js --quick
+
+# Full verified benchmark run writing raw curves to JSON
+osascript -l JavaScript probe/metal-bench.js --json results/probe_m4/metal-bench-<timestamp>.json
+
+# Proven zero-install execution in pristine environment without toolkits
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=$HOME DEVELOPER_DIR=/nonexistent osascript -l JavaScript probe/metal-bench.js --quick
+```
