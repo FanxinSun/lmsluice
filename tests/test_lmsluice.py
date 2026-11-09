@@ -2287,6 +2287,23 @@ class TestGateModel(unittest.TestCase):
         self.assertEqual(lo, 0.0, "the 2-CU row grew a floor it has not earned")
         self.assertFalse(small.occupancy_verified)
 
+    def test_a_measured_low_occupancy_row_says_measured_not_assumed(self):
+        """A ceiling has two causes, and the row must name the right one.
+
+        The Apple M4 row's occupancy was read off the device by
+        probe/metal-bench.js. With CUDA k_shared's shape it holds 2 blocks per
+        unit, below the 3 k was measured at, so the row is a ceiling. Reporting
+        that as "assumed, not read" would misstate a measurement as a guess.
+        """
+        c = self.gate.cost_from(None)
+        m4 = [d for d in self.gate.DEVICES if d.name.startswith("Apple M4")][0]
+        self.assertTrue(m4.occupancy_verified)
+        self.assertEqual(m4.blocks_per_unit(c), 2)
+        lo, hi, why = m4.predict(c)
+        self.assertEqual(lo, 0.0, "a below-measurement occupancy grew a floor")
+        self.assertIn("read off the device", why)
+        self.assertNotIn("assumed", why)
+
     def test_it_still_runs_with_nothing_installed(self):
         """The whole point is that it can be copied onto someone else's box."""
         import shutil

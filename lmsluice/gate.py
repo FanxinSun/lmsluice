@@ -409,8 +409,16 @@ class Device:
         lo, hi = min(comp[0], bw), min(comp[1], bw)
         if not self.hides_latency_as_measured(c):
             b = self.blocks_per_unit(c)
-            why = (f"{b} blocks/unit assumed, not read" if b is not None
-                   else "occupancy unknown")
+            # Two different reasons land here, and the row must say which: an
+            # occupancy nobody read off the device, or one that WAS read and
+            # simply sits below the occupancy k was measured at. Calling the
+            # second "assumed" misreports a measurement as a guess.
+            if b is None:
+                why = "occupancy unknown"
+            elif not self.occupancy_verified:
+                why = f"{b} blocks/unit assumed, not read"
+            else:
+                why = f"{b} blocks/unit, read off the device"
             return 0.0, hi, (f"CEILING: {why}; k was measured at "
                              f"{c.blocks_at_measurement}+ blocks/unit, "
                              f"below which it is a floor")
@@ -451,10 +459,32 @@ DEVICES = [
            units=84, shmem_pool_per_unit=102_400, shmem_cap_per_block=101_376,
            max_threads_per_unit=1536, clock_ghz=2.66, gflops=53_691,
            occupancy_verified=True),   # lmz measured k on this device
+    # Every figure below was read or measured on the device by
+    # probe/metal-bench.js (results/probe_m4/metal-bench-20261109-125645.json,
+    # docs/evaluations/m4-metal-probe.md) unless marked otherwise.
+    Device("Apple M4 (unified)", 120.0,
+           "MEASURED on a Mac mini (Mac16,10), macOS 15.4.1, 2026-11-09 by "
+           "probe/metal-bench.js: 10 GPU cores (ioreg gpu-core-count); cap "
+           "32768 B (maxThreadgroupMemoryLength); pool 77,824 <= pool < 83,968 "
+           "B from occupancy staircases (4 TGs/core at 19,456 B, 3 at 20,992 "
+           "and 23,552, 2 at 31,744-32,768), the 4/core decoder shape "
+           "independently matched by lmz's decoder grid sweep; clock 1.578 GHz "
+           "= IOReport state P15, the state sustained FMA and decode runs sit "
+           "in. Threads per core NOT measured: 1024 is the API lower bound "
+           "(one 1024-thread threadgroup is legal per core) and binds nothing "
+           "derived here. Bus 120 GB/s is spec; 102 GB/s streaming read was "
+           "measured. With CUDA k_shared's constants this row is a CEILING (2 "
+           "blocks/unit, below the 3 k was measured at); lmz's own Metal kernel "
+           "has a different shape and k -- see MEASURED_DECODE",
+           units=10, shmem_pool_per_unit=77_824, shmem_cap_per_block=32_768,
+           max_threads_per_unit=1024, clock_ghz=1.578, gflops=3_663,
+           occupancy_verified=True),
     Device("M4 Max (unified)", 546.0,
            "spec bus; lanes and clock not taken -- Apple threadgroup memory "
            "is 32 KiB, close to the kernel's own request, so occupancy is the "
-           "question and a guess would be the whole answer",
+           "question and a guess would be the whole answer. The Apple M4 row "
+           "above measures per-core facts of the same GPU generation; carrying "
+           "them over to the Max would be a projection, so they are not",
            gflops=14_336),
     Device("Strix Halo (unified)", 256.0,
            "bus from blueprint §1; lanes and clock not taken", gflops=14_848),
@@ -492,7 +522,10 @@ STORAGE = [
     ("NVMe Gen5", 12.0, "spec"),
     ("NVMe Gen4 (this box)", 6.34, "measured, vram/probe"),
     ("UFS 4.0 (phone)", 4.0, "spec"),
+    ("M4 NVMe (Mac mini internal)", 3.12,
+     "measured cold, F_NOCACHE, lmsluice profile; 3.10 GB/s parallel read"),
     ("SATA SSD", 0.55, "spec"),
+    ("M4 USB SSD (exFAT)", 0.373, "measured cold, F_NOCACHE, lmsluice profile"),
     ("eMMC / SD", 0.30, "spec"),
 ]
 
@@ -502,6 +535,14 @@ MEASURED_DECODE = {
     "lmz CUDA, per-chunk table, RTX 5080": 111.0,
     "lmz CUDA, through lmsluice, BF16 1 MiB chunks": 101.0,
     "lmz CPU, 4-16 threads": 2.0,
+    # lmz/docs/evaluations/m4-metal-decoder-remeasure.md, 2026-11-09: real
+    # Qwen3 exponent planes, GPU timestamps, byte-identical. Its own k there is
+    # 268.9-273.1 lane-cycles/B at <=1 TG/core and ~300 at 4/core, at an
+    # IOReport-measured clock -- compute-bound, DRAM at ~28% of spec.
+    "lmz Metal, shared table, Apple M4, kernel only": 25.2,
+    # The same decoder called the shipped way (lmz.gpu.decode_batch, wall
+    # clock): host copies, not decoding, set this number.
+    "lmz Metal, through lmz.gpu.decode_batch, Apple M4": 2.0,
 }
 
 
