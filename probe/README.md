@@ -162,3 +162,44 @@ osascript -l JavaScript probe/metal-bench.js --json results/probe_m4/metal-bench
 # Proven zero-install execution in pristine environment without toolkits
 env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=$HOME DEVELOPER_DIR=/nonexistent osascript -l JavaScript probe/metal-bench.js --quick
 ```
+
+## igpu-pool.ps1 — the 2-CU pool measurement, as a kit (Windows, D3D11)
+
+`gate.py`'s largest open parameter is the smallest AMD iGPU's shared-memory **pool per compute
+unit**; it decides whether that part beats the CPU decoder (1 resident block per CU, or 3). No
+interface reports it. The method written up above is implemented here as a script that needs
+nothing installed: Windows PowerShell 5.1, `d3d11.dll`, `d3dcompiler_47.dll`, `dxgi.dll`.
+
+```powershell
+powershell -File igpu-pool.ps1 -Adapter -1                  # list adapters, exit
+powershell -File igpu-pool.ps1 -Adapter 1 -Units 2          # measure adapter 1, which has 2 CUs
+```
+
+`-Units` is typed in (D3D11 cannot query it). The script writes `igpu-pool-<n>-<time>.json` with
+the **raw timing curves** for seventeen shapes (the decoder's own threadgroup requests, an S sweep,
+a T sweep), each calibrated so one group runs ≥ 0.8 ms, each kernel output checked against the same
+chain computed on the CPU. It prints a preliminary first-jump estimate only.
+
+```
+python3 igpu-pool-analyze.py run1.json run2.json --expect lmz_cuda_shared_dynamic=252
+python3 igpu-pool-analyze.py --selftest
+```
+
+The analyzer (standard library only) applies one set of rules to every shape: a jump is measured
+against the local plateau, capacity is an *interval* on the coarse grid, a shape is clean only with a
+second step near twice the capacity and exactly one integer groups-per-unit inside the interval, and
+the pool bound is the intersection over shapes that are **clean and equal in every run given**. It
+also reads `metal-bench.js` output. Checked on the real M4 data: one run gives 81,920 ≤ pool < 83,968
+with a loud single-run warning; with a second run in which the boundary shape drifts, as it did, that
+shape is excluded and the bound is 77,824 ≤ pool < 83,968, which is what `gate.py` carries.
+
+**Calibrate first.** Run it on an RTX 5080 with `-Units 84` and require the (192, 31,744) row's
+capacity interval to contain 252 (3 groups per SM; lmz measured 3–4 and the queried pool of 102,400 B
+gives 3). A method that cannot recover that has not earned an answer on a device where nothing can
+check it.
+
+**Status.** As of 2026-11-09 this script has been written and its HLSL compiled to SPIR-V by glslang
+(syntax and semantics checked); the analyzer is tested on synthetic curves and on real Apple M4
+staircase data. **The PowerShell/C# interop has not been run on any Windows machine.** Its vtable
+slots are those of `igpu-bench.ps1`, which has run, plus none new; treat the first real run as the
+test of the script.
