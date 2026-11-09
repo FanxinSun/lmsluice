@@ -1,0 +1,553 @@
+{
+  "env": {
+    "platform": "Apple M4 Mac mini (10 CPU cores, 24 GB Unified Memory, macOS 15.4.1)",
+    "git_sha": "8647de6b",
+    "frameworks": "Python 3.11.17, torch 2.12.0 (MPS), transformers 5.8.1, lmz 1.3.0, lmsluice 0.2.0"
+  },
+  "total_plain_bytes": 8044982000,
+  "total_coded_bytes": 5337832072,
+  "compression_ratio": 0.6634983237998544,
+  "build_accounting": {
+    "total_build_time_s": 5.13,
+    "usb_transfer_time_s": 13.95,
+    "encoder_peak_rss_mb": 252.3
+  },
+  "findings": {
+    "F1": "torchadapter._mps -> _host(prefer_map=True) unconditionally maps plain local files, bypassing parallel transport pread even when cold. Consequence: Arm B ties incumbent Arm A cold.",
+    "F2": "lmsluice-cli plan reported source unknown on USB because profile is keyed on st_dev (dev:16777241), but macOS assigns dynamic dev:16777237 after unmount/remount.",
+    "F3": "Peak RSS for coded arms (~4.6-4.8 GB) and eager plain Arm D (~4.5 GB) reflects holding the host-decoded memoryview simultaneously with MPS device tensors during .to('mps'). Plain mmap (Arms A/B) avoids this by streaming tensors individually (peak ~525 MB).",
+    "F4_internal_bottleneck": "Internal plain mmap (Arms A/B) achieves ~1.07-1.09 GB/s headline (1.20 GB/s load split) not due to MPS dispatch, but because demand-paging cold mmap pages is serial. Manager diagnostic on resident file reaches 4.0-6.2 GB/s on MPS; parallel pread (Arm D2) reaches ~3.1 GB/s read stage cold.",
+    "F5_overlapped_host_buffers": "Harness Arm D overlapped host buffers by keeping previous shard host buffer in memory while reading the next shard (~12 GB memory pressure across host buffers and MPS tensors on unified memory), which throttled subsequent shard reads. In Arm D2, releasing each shard's host buffer immediately before the next read (m.close(); del base; del mv; gc.collect()) allows lmsluice parallel transport to achieve uninhibited storage throughput (~3.1 GB/s read stage) on internal NVMe. Any lmsluice pipeline loading shard-by-shard on unified memory must release host buffers between shards."
+  },
+  "arms": {
+    "A-usb": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 30.289940499991644,
+          "min": 29.481524917006027,
+          "max": 31.360921250015963,
+          "all": [
+            31.360921250015963,
+            30.289940499991644,
+            29.481524917006027
+          ]
+        },
+        "splits": {
+          "load_s_median": 29.435253374977037,
+          "load_state_dict_s_median": 0.00483841699315235,
+          "first_forward_s_median": 0.8454033339512534,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.2655991351320819,
+        "peak_rss_mb_median": 528.40625,
+        "diskio_bytes_read_median": 8047191040,
+        "residency_average_median": 0.0,
+        "residency_max_median": 0.0
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 26.391762186976848,
+          "min": 26.197955915995408,
+          "max": 26.58556845795829,
+          "all": [
+            26.197955915995408,
+            26.58556845795829
+          ]
+        },
+        "splits": {
+          "load_s_median": 25.6006646665046,
+          "load_state_dict_s_median": 0.004409770481288433,
+          "first_forward_s_median": 0.7866795625013765,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.3048292851005545,
+        "peak_rss_mb_median": 520.140625,
+        "diskio_bytes_read_median": 8045450240.0,
+        "residency_average_median": 0.4858585858585859,
+        "residency_max_median": 0.4858585858585859
+      }
+    },
+    "A-int": {
+      "cold": {
+        "count": 9,
+        "t0_to_tend_s": {
+          "median": 7.354231874982361,
+          "min": 6.834400374966208,
+          "max": 8.282203790964559,
+          "all": [
+            7.486322625016328,
+            7.553792542021256,
+            6.834400374966208,
+            7.251986083982047,
+            7.669584250019398,
+            7.136760749970563,
+            8.282203790964559,
+            7.069185791013297,
+            7.354231874982361
+          ]
+        },
+        "splits": {
+          "load_s_median": 6.596772833028808,
+          "load_state_dict_s_median": 0.0053219160181470215,
+          "first_forward_s_median": 0.7567761249956675,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.0939255297847537,
+        "peak_rss_mb_median": 521.1875,
+        "diskio_bytes_read_median": 8044285952,
+        "residency_average_median": 0.007601854909169956,
+        "residency_max_median": 0.021213616181549086
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 6.970921291504055,
+          "min": 6.8142233330290765,
+          "max": 7.127619249979034,
+          "all": [
+            7.127619249979034,
+            6.8142233330290765
+          ]
+        },
+        "splits": {
+          "load_s_median": 6.246370562468655,
+          "load_state_dict_s_median": 0.004788853490026668,
+          "first_forward_s_median": 0.719748896517558,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.1540772967563093,
+        "peak_rss_mb_median": 520.3515625,
+        "diskio_bytes_read_median": 8047753216.0,
+        "residency_average_median": 0.47624105461393595,
+        "residency_max_median": 0.47624105461393595
+      }
+    },
+    "B-usb": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 30.07993033400271,
+          "min": 29.241347749950364,
+          "max": 30.37479849997908,
+          "all": [
+            30.07993033400271,
+            30.37479849997908,
+            29.241347749950364
+          ]
+        },
+        "splits": {
+          "load_s_median": 29.2455010410049,
+          "load_state_dict_s_median": 0.00450495898257941,
+          "first_forward_s_median": 0.829921375028789,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.267453478471187,
+        "peak_rss_mb_median": 525.078125,
+        "diskio_bytes_read_median": 8045315072,
+        "residency_average_median": 0.0,
+        "residency_max_median": 0.0
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 25.32595314551145,
+          "min": 24.43234158301493,
+          "max": 26.219564708007965,
+          "all": [
+            26.219564708007965,
+            24.43234158301493
+          ]
+        },
+        "splits": {
+          "load_s_median": 24.478054249979323,
+          "load_state_dict_s_median": 0.005171770520973951,
+          "first_forward_s_median": 0.8427246454812121,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.31765761998283654,
+        "peak_rss_mb_median": 514.765625,
+        "diskio_bytes_read_median": 8047725568.0,
+        "residency_average_median": 0.48629481253210066,
+        "residency_max_median": 0.48629481253210066
+      }
+    },
+    "B-int": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 7.556797874975018,
+          "min": 7.415065541979857,
+          "max": 7.698656666034367,
+          "all": [
+            7.556797874975018,
+            7.415065541979857,
+            7.698656666034367
+          ]
+        },
+        "splits": {
+          "load_s_median": 6.781847542035393,
+          "load_state_dict_s_median": 0.005868458014447242,
+          "first_forward_s_median": 0.8535652079735883,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.0646019826256892,
+        "peak_rss_mb_median": 522.90625,
+        "diskio_bytes_read_median": 8044408832,
+        "residency_average_median": 0.007513544453763977,
+        "residency_max_median": 0.007513544453763977
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 6.917981562495697,
+          "min": 6.645746790978592,
+          "max": 7.190216334012803,
+          "all": [
+            7.190216334012803,
+            6.645746790978592
+          ]
+        },
+        "splits": {
+          "load_s_median": 6.210497916006716,
+          "load_state_dict_s_median": 0.006722167017869651,
+          "first_forward_s_median": 0.7007576460018754,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.1629088524337916,
+        "peak_rss_mb_median": 539.1796875,
+        "diskio_bytes_read_median": 8045297664.0,
+        "residency_average_median": 0.47241499743194654,
+        "residency_max_median": 0.47241499743194654
+      }
+    },
+    "C-usb": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 15.117561874969397,
+          "min": 15.057685333013069,
+          "max": 16.902687583002262,
+          "all": [
+            15.057685333013069,
+            15.117561874969397,
+            16.902687583002262
+          ]
+        },
+        "splits": {
+          "load_s_median": 14.881701499980409,
+          "load_state_dict_s_median": 0.0037660409579984844,
+          "first_forward_s_median": 0.2320210419711657,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.5321613409977385,
+        "peak_rss_mb_median": 4558.484375,
+        "diskio_bytes_read_median": 5339004416,
+        "residency_average_median": 0.0,
+        "residency_max_median": 0.0
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 15.148939020960825,
+          "min": 15.07251816696953,
+          "max": 15.225359874952119,
+          "all": [
+            15.225359874952119,
+            15.07251816696953
+          ]
+        },
+        "splits": {
+          "load_s_median": 14.926755937514827,
+          "load_state_dict_s_median": 0.003770562499994412,
+          "first_forward_s_median": 0.21841068752110004,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.5310591051207324,
+        "peak_rss_mb_median": 4605.4375,
+        "diskio_bytes_read_median": 5329341440.0,
+        "residency_average_median": 0.40836150502206814,
+        "residency_max_median": 0.40836150502206814
+      }
+    },
+    "C-int": {
+      "cold": {
+        "count": 9,
+        "t0_to_tend_s": {
+          "median": 5.152509541017935,
+          "min": 4.651336624985561,
+          "max": 5.619444416020997,
+          "all": [
+            5.619444416020997,
+            5.185810207971372,
+            5.354354500013869,
+            4.7207282920135185,
+            4.651336624985561,
+            4.7486197499674745,
+            4.874824416008778,
+            5.325593875022605,
+            5.152509541017935
+          ]
+        },
+        "splits": {
+          "load_s_median": 4.638758499990217,
+          "load_state_dict_s_median": 0.004789708997122943,
+          "first_forward_s_median": 0.48923529102467,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.561371587176261,
+        "peak_rss_mb_median": 4772.203125,
+        "diskio_bytes_read_median": 5337047040,
+        "residency_average_median": 0.011469732819498762,
+        "residency_max_median": 0.032009925558312655
+      },
+      "repeat_partially_resident": {
+        "count": 2,
+        "t0_to_tend_s": {
+          "median": 5.0609386040014215,
+          "min": 4.883559332985897,
+          "max": 5.238317875016946,
+          "all": [
+            5.238317875016946,
+            4.883559332985897
+          ]
+        },
+        "splits": {
+          "load_s_median": 4.5672901250072755,
+          "load_state_dict_s_median": 0.0045601459860336035,
+          "first_forward_s_median": 0.48908662496251054,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.5896225244936284,
+        "peak_rss_mb_median": 4819.4140625,
+        "diskio_bytes_read_median": 3901106176.0,
+        "residency_average_median": 0.5629827745673133,
+        "residency_max_median": 0.5629827745673133
+      }
+    },
+    "D-usb": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 22.276288958033547,
+          "min": 22.255378916976042,
+          "max": 23.42739258299116,
+          "all": [
+            22.255378916976042,
+            23.42739258299116,
+            22.276288958033547
+          ]
+        },
+        "splits": {
+          "load_s_median": 22.058000582968816,
+          "load_state_dict_s_median": 0.003842459002044052,
+          "first_forward_s_median": 0.21444366598734632,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 0.3611455218217,
+        "peak_rss_mb_median": 8195.078125,
+        "diskio_bytes_read_median": 8045233152,
+        "residency_average_median": 0.0,
+        "residency_max_median": 0.0
+      },
+      "repeat_partially_resident": null
+    },
+    "D-int": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 5.662847707979381,
+          "min": 5.337037165998481,
+          "max": 5.801308249996509,
+          "all": [
+            5.337037165998481,
+            5.662847707979381,
+            5.801308249996509
+          ]
+        },
+        "splits": {
+          "load_s_median": 5.181308250001166,
+          "load_state_dict_s_median": 0.00493937503779307,
+          "first_forward_s_median": 0.47659908403875306,
+          "shard_splits_median": null
+        },
+        "effective_rate_gb_s": 1.4206601368890799,
+        "peak_rss_mb_median": 5957.78125,
+        "diskio_bytes_read_median": 8044265472,
+        "residency_average_median": 0.007513544453763977,
+        "residency_max_median": 0.021213616181549086
+      },
+      "repeat_partially_resident": null
+    },
+    "D2-usb": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 22.928718834009487,
+          "min": 22.668932500004303,
+          "max": 24.922091374988668,
+          "all": [
+            22.668932500004303,
+            24.922091374988668,
+            22.928718834009487
+          ]
+        },
+        "splits": {
+          "load_s_median": 22.686542208015453,
+          "load_state_dict_s_median": 0.0036511250073090196,
+          "first_forward_s_median": 0.23841437499504536,
+          "shard_splits_median": [
+            {
+              "shard": "model-00001-of-00003.safetensors",
+              "read_s_median": 10.425157833029516,
+              "to_mps_s_median": 0.33817345899296924
+            },
+            {
+              "shard": "model-00002-of-00003.safetensors",
+              "read_s_median": 10.513631040987093,
+              "to_mps_s_median": 0.805790749960579
+            },
+            {
+              "shard": "model-00003-of-00003.safetensors",
+              "read_s_median": 0.26983945904066786,
+              "to_mps_s_median": 0.006531124992761761
+            }
+          ]
+        },
+        "effective_rate_gb_s": 0.35086923339419723,
+        "peak_rss_mb_median": 4494.015625,
+        "diskio_bytes_read_median": 8045011968,
+        "residency_average_median": 0.0,
+        "residency_max_median": 0.0
+      },
+      "repeat_partially_resident": null
+    },
+    "D2-int": {
+      "cold": {
+        "count": 3,
+        "t0_to_tend_s": {
+          "median": 5.259208250034135,
+          "min": 5.160967833013274,
+          "max": 5.713864250050392,
+          "all": [
+            5.713864250050392,
+            5.160967833013274,
+            5.259208250034135
+          ]
+        },
+        "splits": {
+          "load_s_median": 4.742342000012286,
+          "load_state_dict_s_median": 0.003682499984279275,
+          "first_forward_s_median": 0.5131356249912642,
+          "shard_splits_median": [
+            {
+              "shard": "model-00001-of-00003.safetensors",
+              "read_s_median": 1.2739078330341727,
+              "to_mps_s_median": 0.3409992909873836
+            },
+            {
+              "shard": "model-00002-of-00003.safetensors",
+              "read_s_median": 1.2891113749938086,
+              "to_mps_s_median": 1.4397757920087315
+            },
+            {
+              "shard": "model-00003-of-00003.safetensors",
+              "read_s_median": 0.030810374999418855,
+              "to_mps_s_median": 0.0060667499783448875
+            }
+          ]
+        },
+        "effective_rate_gb_s": 1.529694512467306,
+        "peak_rss_mb_median": 4468.03125,
+        "diskio_bytes_read_median": 8043327488,
+        "residency_average_median": 0.007601854909169956,
+        "residency_max_median": 0.021213616181549086
+      },
+      "repeat_partially_resident": null
+    }
+  },
+  "gate_check": {
+    "read_stage_plain_rate_gb_s": 3.1015846425077247,
+    "gate_assumed_rate_gb_s": 3.12,
+    "read_stage_reached_gate": true,
+    "shared_mps_ingest_time_s": 1.78684183297446,
+    "explanation": "Plain read stage reaches near-saturation of storage rate (~3.1 GB/s vs 3.12 GB/s gate assumption). The shared MPS ingest cost paid by both plain and coded routes accounts for ~1.5s of total t0->t_end, compressing the endpoint ratio relative to the read-stage ratio."
+  },
+  "projections": {
+    "usb_ideal_plain_projection_s": 22.3683163538874,
+    "internal_ideal_plain_projection_s": 3.3785198717948717
+  },
+  "numerical_checks": {
+    "A-usb": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "A-int": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "B-usb": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "B-int": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "C-usb": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "C-int": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "D-usb": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "D-int": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "D2-usb": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    },
+    "D2-int": {
+      "torch_equal": true,
+      "max_abs_diff": 0.0,
+      "greedy_text_identical": true,
+      "verdict": "PASS",
+      "sample_text": "Hello! Tell me what makes Apple Silicon unique in one short sentence. Apple Silicon is unique because it is a custom-designed, integrated system-on-a-chip (SoC) that combines the CPU, GPU, Neural Engine, and"
+    }
+  }
+}

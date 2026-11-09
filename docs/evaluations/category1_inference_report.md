@@ -1,6 +1,6 @@
 # Category 1: Inference Qualification Report (SLUICE-USE-0)
 
-> **Document Status:** Executed & Certified  
+> **Status (2026-11-09): UNVERIFIED — not qualification.** Recorded on Apple M4 / 24 GB / macOS 15.4.1. The original "certified" status was withdrawn; see the SLUICE-USE-0 row of [PLAN.md](../../plan/PLAN.md) for the known measurement defects. Byte-identity and numerical-equality results stand; speedup and memory claims need a re-run with a plain internal-disk control. **Superseded by [category1_rerun_report.md](category1_rerun_report.md).**  
 > **Target Model:** `Qwen3-4B-Instruct-2507` (8.05 GB total, 398 BF16 tensors across 3 shards)  
 > **Source Location:** `/Volumes/Elements/models/Qwen3-4B-Instruct-2507` (External USB SSD, ExFAT link: 0.37 GB/s)  
 > **Host Platform:** Apple M4 Mac mini (10 CPUs, 24 GB Unified Memory, macOS 15.4.1)  
