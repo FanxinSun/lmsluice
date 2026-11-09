@@ -56,12 +56,18 @@ high-bandwidth card the memory system runs out first; on a 2-CU part compute
 binds by roughly 3x and the bandwidth reading is not live there at all.
 
 **A tighter interval is not a measurement, and this one is still a projection.**
-Everything lmz did was on an RTX 5080. Nobody has run a 2-CU device. Two things
-stay unverified and are stated on every row that depends on them: whether decode
-stays linear in resident lanes down to 2 CUs or meets a cache, scheduler or
-driver wall first, and how a unified-memory part behaves with a CPU contending
-for the same bus. The founding caveat survives the narrowing unchanged -- at one
-block per unit the smallest AMD iGPU still lands below the CPU decoder.
+cuda's interval was taken on an RTX 5080. lmz's Metal kernel -- a different
+kernel, with its own constants in `FALLBACK_METAL` -- has since been measured on
+an Apple M4, a unified-memory part: compute-bound at ~28% of DRAM, k 269-313 at
+the kernel's clock, linear in resident threadgroups to 4 per core with k rising
+about 16% as they share a core. On that part a CPU streaming 71-81 GB/s on the
+same bus slowed the decoder 17-29% although DRAM was not what bound it -- the
+first measurement of the second caveat below, on one device. Nobody has run a
+2-CU device, so both caveats stay open AT THAT SCALE and are stated on every row
+that depends on them: whether decode stays linear in resident lanes down to 2
+CUs or meets a cache, scheduler or driver wall first, and how much a CPU on the
+same bus costs there. The founding caveat survives unchanged -- at one block per
+unit the smallest AMD iGPU still lands below the CPU decoder.
 
 The refusal machinery stays. Being able to decline a constant in a unit this
 curve cannot use predates lmz being able to answer the question, and being right
@@ -76,7 +82,7 @@ is a documented fallback carrying its provenance.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # lmz on model weights: 34.7% less disk, so the coded stream is 0.653 of the
 # original. A default for the standalone table only; a real plan uses the ratio
@@ -119,6 +125,48 @@ FALLBACK_PROVENANCE = (
     "where compute binds: a refinement of a badly-conditioned fit, not a "
     "contradiction. Nothing about the kernel changed. One device either way: "
     "no low-FLOP-per-byte part has been measured.")
+
+# The same, for lmz's Metal shared-table kernel: a DIFFERENT kernel from CUDA
+# k_shared (128 threads, direct refill reads, a 19,456 B compiled footprint),
+# so it gets its own constants rather than CUDA's. Measured on an Apple M4,
+# where CUDA's constants would predict it 26-44% too fast.
+FALLBACK_METAL = {
+    "k_cycles_per_byte": (269.4, 313.1),
+    "expansion": 2.975,
+    # Never reached: on the M4 the kernel stops at its residency limit with
+    # DRAM at ~28% of spec, so no saturation fraction exists. CUDA's stands in
+    # (visibly, in the provenance); bandwidth does not bind there by ~2x.
+    "achieved_fraction": None,
+    "lanes": 8,
+    "lut_bytes": 17_408,         # LUT 16,384 + starts 1,024: fixed per threadgroup
+    "per_group_bytes": 128,      # the output stage; the unused ring compiles out
+    "block_threads": 128,
+    "blocks_at_measurement": (1, 4),
+    "k_single_point": False,
+}
+FALLBACK_METAL_PROVENANCE = (
+    "lmz.gpu.cost_model('shared', backend='metal'): the Metal shared-table "
+    "kernel (lmz_decode_plane_direct) measured on an Apple M4, 10 GPU cores, "
+    "by a grid sweep at fixed byte traffic over 936.6 MB of real Qwen3 BF16 "
+    "exponent planes, byte-identical at every size. k at the KERNEL's clock "
+    "(IOReport P15 = 1578 MHz, whose residency matches the summed kernel time "
+    "in every row): 269.4-276.5 at <=1 threadgroup per core, 288 at 2, 297-298 "
+    "at 3, 312-313 at 4. On this device k RISES with co-residency -- groups "
+    "contend rather than only hiding latency -- so a device holding fewer than "
+    "4 per core sits toward the low end. Compute-bound at every occupancy; "
+    "desktop GPU clients were present in most rows, so it is conditional on "
+    "that background. Record: lmz docs/evaluations/m4-metal-decoder-remeasure.md")
+
+# The backend whose kernel a device runs. Constants describe one kernel, and
+# lmz's kernels differ in shape by backend, so a row is predicted with its own
+# backend's constants. Where no kernel of that backend has been measured
+# (vulkan, today), cuda's are BORROWED and the row says so: a projection, not a
+# description of a kernel that never ran there.
+BACKENDS = ("cuda", "metal", "vulkan")
+FALLBACKS = {
+    "cuda": (FALLBACK, FALLBACK_PROVENANCE),
+    "metal": (FALLBACK_METAL, FALLBACK_METAL_PROVENANCE),
+}
 
 # The occupancy the k interval was measured under: lmz publishes it as a range,
 # 3 to 4 blocks resident per SM. This is not a footnote, it is what the interval
@@ -166,6 +214,11 @@ class Constants:
     # The occupancy k was measured under, and whether k came from a sweep.
     blocks_at_measurement: int = K_MEASURED_AT_BLOCKS_PER_UNIT
     k_single_point: bool | None = FALLBACK["k_single_point"]
+
+    # Whose kernel these constants describe, and -- when no kernel of that
+    # backend has been measured -- whose constants were borrowed to stand in.
+    backend: str = "cuda"
+    borrowed_from: str | None = None
 
     @property
     def traffic(self) -> float:
@@ -223,8 +276,14 @@ def _published(cost, field: str, default, pair: bool = False):
     return (got.low, got.high) if pair else got.low
 
 
-def cost_from(codec_cost=None) -> Constants:
+def cost_from(codec_cost=None, backend: str = "cuda") -> Constants:
     """Constants from a codec's published cost model, or the fallback.
+
+    `backend` names whose kernel the constants describe, and `codec_cost`, if
+    given, must be the codec's record for that backend's kernel. The default
+    is cuda, which is exactly what this function returned before backends
+    existed. A backend with no measured kernel gets cuda's constants marked
+    `borrowed_from`, and every row predicted with them says so.
 
     **Units are checked, not assumed.** A published `k` in a unit this curve
     does not recognise is reported and *not* used -- refusing loudly beats
@@ -232,41 +291,65 @@ def cost_from(codec_cost=None) -> Constants:
     did. That refusal predates lmz being able to answer the question and
     survives it: being right today is not a reason to stop checking.
     """
+    if backend not in BACKENDS:
+        raise ValueError(f"backend must be one of {BACKENDS}, not {backend!r}")
+    borrowed = None
+    if backend in FALLBACKS:
+        fb, fb_prov = FALLBACKS[backend]
+    else:
+        fb, fb_prov = FALLBACKS["cuda"]
+        if codec_cost is None:
+            borrowed = "cuda"
+            fb_prov = (f"BORROWED: no {backend} kernel has been measured, so "
+                       f"these are cuda's constants used as a projection. "
+                       f"{fb_prov}")
+    af_default = fb["achieved_fraction"]
+    if af_default is None:
+        af_default = FALLBACK["achieved_fraction"]
+        fb_prov = (f"{fb_prov}. achieved_fraction is not published for this "
+                   f"kernel (never reached), so cuda's {af_default} stands in.")
+
     def build(k_low, k_high, provenance, cost=None):
         """One construction path, so a refusal carries the same shape as a
         success and cannot quietly drop the rest of the model."""
         blocks = _published(cost, "blocks_per_unit_at_measurement",
-                            FALLBACK["blocks_at_measurement"], pair=True)
+                            fb["blocks_at_measurement"], pair=True)
         single = getattr(cost, "k_single_point", None) if cost is not None else None
+        af = _published(cost, "achieved_fraction", af_default)
+        if (cost is not None and af == af_default
+                and fb["achieved_fraction"] is None):
+            provenance = (f"{provenance}; achieved_fraction not published, "
+                          f"cuda's {af_default} stands in")
         return Constants(
             k_low, k_high,
-            _published(cost, "expansion", FALLBACK["expansion"]),
-            _published(cost, "achieved_fraction", FALLBACK["achieved_fraction"]),
+            _published(cost, "expansion", fb["expansion"]),
+            af,
             provenance,
             lut_bytes=int(_published(cost, "shmem_lut_bytes",
-                                     FALLBACK["lut_bytes"])),
+                                     fb["lut_bytes"])),
             per_group_bytes=int(_published(cost, "shmem_per_group_bytes",
-                                           FALLBACK["per_group_bytes"])),
-            lanes_per_group=int(_published(cost, "lanes", FALLBACK["lanes"])),
+                                           fb["per_group_bytes"])),
+            lanes_per_group=int(_published(cost, "lanes", fb["lanes"])),
             block_threads=int(_published(cost, "block_threads",
-                                         FALLBACK["block_threads"])),
+                                         fb["block_threads"])),
             # The low end: k's own high end already prices that occupancy, so a
             # device at or above it sits inside the measurement.
             blocks_at_measurement=int(min(blocks)),
-            k_single_point=(FALLBACK["k_single_point"] if single is None
-                            else single))
+            k_single_point=(fb["k_single_point"] if single is None
+                            else single),
+            backend=backend, borrowed_from=borrowed)
 
     if codec_cost is None:
-        lo, hi = FALLBACK["k_cycles_per_byte"]
-        return build(lo, hi, f"fallback: {FALLBACK_PROVENANCE}")
+        lo, hi = fb["k_cycles_per_byte"]
+        return build(lo, hi, f"fallback: {fb_prov}")
     k = getattr(codec_cost, "k", None)
     if k is None or not k.low:
-        lo, hi = FALLBACK["k_cycles_per_byte"]
+        lo, hi = fb["k_cycles_per_byte"]
         return build(lo, hi,
-                     f"codec published no k; fallback: {FALLBACK_PROVENANCE}",
+                     f"codec published no k; fallback: {fb_prov}",
                      codec_cost)
     if k.unit != K_UNIT:
-        lo, hi = FALLBACK["k_cycles_per_byte"]
+        lo, hi = fb["k_cycles_per_byte"]
         # The refusal is about `k` alone. Whatever else the codec published in
         # units this curve does recognise is still used, and the row says which
         # value was declined -- a units error in one field is not a reason to
@@ -276,9 +359,32 @@ def cost_from(codec_cost=None) -> Constants:
                      f"{k.unit}, and this curve is written in {K_UNIT}. "
                      f"They do not convert without further per-device "
                      f"numbers, so the published value is not used. "
-                     f"Fallback: {FALLBACK_PROVENANCE}", codec_cost)
+                     f"Fallback: {fb_prov}", codec_cost)
     return build(k.low, k.high,
                  k.provenance or "published by the codec", codec_cost)
+
+
+def constants_by_backend(cuda_cost=None, metal_cost=None) -> dict:
+    """One Constants per backend: each from its codec record, or its fallback."""
+    return {"cuda": cost_from(cuda_cost, "cuda"),
+            "metal": cost_from(metal_cost, "metal"),
+            "vulkan": cost_from(None, "vulkan")}
+
+
+def constants_for(dev, by_backend: dict) -> Constants:
+    """The constants a device row is predicted with: its own backend's.
+
+    A backend missing from `by_backend` gets cuda's, marked borrowed -- never
+    silently, because a row predicted with another kernel's cost is a
+    projection and is quoted as a measurement otherwise.
+    """
+    c = by_backend.get(dev.backend)
+    if c is not None:
+        return c
+    base = by_backend["cuda"]
+    return replace(base, borrowed_from=base.backend,
+                   provenance=(f"BORROWED for a {dev.backend} device: "
+                               f"{base.provenance}"))
 
 
 @dataclass(frozen=True)
@@ -307,6 +413,9 @@ class Device:
     gflops: float | None = None     # kept only to show what the old model used
     occupancy_verified: bool = False     # the shared-memory budget was read,
                                          # not assumed from an architecture
+    # Whose decoder kernel this device runs, which decides whose constants it
+    # is predicted with. Keyword-only in practice: it is last, with a default.
+    backend: str = "cuda"
 
     def blocks_per_unit(self, c: Constants) -> int | None:
         """None when the pool has not been obtained -- which is not the same as
@@ -402,6 +511,25 @@ class Device:
         measured with and so hides less of the dependent-load chain. In that
         case `high` is a ceiling and the row must be read as "no faster than".
         """
+        lo, hi, why = self._predict(c)
+        return lo, hi, why + self._constants_note(c)
+
+    def _constants_note(self, c: Constants) -> str:
+        """Say when the constants are not this device's own kernel's.
+
+        A row predicted with another backend's cost is a projection. It reads
+        exactly like a prediction from its own kernel unless it says so, and the
+        row is what gets quoted.
+        """
+        if c.borrowed_from:
+            return (f" [k BORROWED from {c.borrowed_from}: no {self.backend} "
+                    f"kernel has been measured]")
+        if c.backend != self.backend:
+            return (f" [{c.backend} kernel's constants on a {self.backend} "
+                    f"device: a projection]")
+        return ""
+
+    def _predict(self, c: Constants) -> tuple[float, float, str]:
         bw = self.bandwidth_bound(c)
         comp = self.compute_bound(c)
         if comp is None:
@@ -458,7 +586,7 @@ DEVICES = [
            "2.617 GHz clock rate; bus from lmz cost_model() provenance",
            units=84, shmem_pool_per_unit=102_400, shmem_cap_per_block=101_376,
            max_threads_per_unit=1536, clock_ghz=2.66, gflops=53_691,
-           occupancy_verified=True),   # lmz measured k on this device
+           occupancy_verified=True, backend="cuda"),   # lmz measured k on this device
     # Every figure below was read or measured on the device by
     # probe/metal-bench.js (results/probe_m4/metal-bench-20261109-125645.json,
     # docs/evaluations/m4-metal-probe.md) unless marked otherwise.
@@ -478,22 +606,22 @@ DEVICES = [
            "has a different shape and k -- see MEASURED_DECODE",
            units=10, shmem_pool_per_unit=77_824, shmem_cap_per_block=32_768,
            max_threads_per_unit=1024, clock_ghz=1.578, gflops=3_663,
-           occupancy_verified=True),
+           occupancy_verified=True, backend="metal"),
     Device("M4 Max (unified)", 546.0,
            "spec bus; lanes and clock not taken -- Apple threadgroup memory "
            "is 32 KiB, close to the kernel's own request, so occupancy is the "
            "question and a guess would be the whole answer. The Apple M4 row "
            "above measures per-core facts of the same GPU generation; carrying "
            "them over to the Max would be a projection, so they are not",
-           gflops=14_336),
+           gflops=14_336, backend="metal"),
     Device("Strix Halo (unified)", 256.0,
-           "bus from blueprint §1; lanes and clock not taken", gflops=14_848),
+           "bus from blueprint §1; lanes and clock not taken", gflops=14_848, backend="vulkan"),
     Device("Radeon 780M (iGPU)", 60.0,
            "spec arithmetic, never run; lanes and clock not taken",
-           gflops=4_300),
+           gflops=4_300, backend="vulkan"),
     Device("Phone SoC GPU (class)", 68.0,
            "class figure, blueprint §1; lanes and clock not taken",
-           gflops=2_500),
+           gflops=2_500, backend="vulkan"),
     Device("Radeon 2-CU (iGPU)", 59.4,
            "QUERIED from the device through Vulkan on the Windows side "
            "(the adapter is not reachable from Vulkan inside WSL2 -- "
@@ -506,7 +634,7 @@ DEVICES = [
            "MEASURED.md; clock 2.2 GHz from that file's FMA arithmetic. "
            "THE POOL IS UNOBTAINED -- see the closing note.",
            units=2, shmem_cap_per_block=32_768, max_threads_per_unit=2048,
-           clock_ghz=2.2, gflops=567),
+           clock_ghz=2.2, gflops=567, backend="vulkan"),
            # shmem_pool_per_unit is deliberately absent, and it is not for want
            # of looking: core Vulkan reports no per-unit pool, and NEITHER
            # VK_AMD_shader_core_properties NOR shader_core_properties2 -- both
@@ -540,6 +668,9 @@ MEASURED_DECODE = {
     # 268.9-273.1 lane-cycles/B at <=1 TG/core and ~300 at 4/core, at an
     # IOReport-measured clock -- compute-bound, DRAM at ~28% of spec.
     "lmz Metal, shared table, Apple M4, kernel only": 25.2,
+    # The same kernel at exactly its residency limit (40 threadgroups, one
+    # wave): what the model's compute term describes, with no wave tail.
+    "lmz Metal, shared table, Apple M4, 40 resident threadgroups": 25.9,
     # The same decoder called the shipped way (lmz.gpu.decode_batch, wall
     # clock): host copies, not decoding, set this number.
     "lmz Metal, through lmz.gpu.decode_batch, Apple M4": 2.0,
@@ -561,31 +692,42 @@ def verdict(dev: Device, disk_gb_s: float, c: Constants,
     return "measure"
 
 
-def _table(codec_cost=None) -> None:
-    c = cost_from(codec_cost)
+def _table(codec_cost=None, metal_cost=None) -> None:
+    by = constants_by_backend(codec_cost, metal_cost)
+    c = by["cuda"]
     print("Can this machine decode faster than its disk?\n")
     print(f"f = {F_CODED}  ->  ideal speedup 1/f = {1 / F_CODED:.2f}x")
-    print(f"k = {c.k_low:.0f}-{c.k_high:.0f} {K_UNIT}")
-    print(f"traffic = 1 + 1/{c.expansion} = {c.traffic:.3f} DRAM bytes per decoded byte")
-    print(f"    provenance: {c.provenance}\n")
+    print("Constants are per kernel, and a device is predicted with its own")
+    print("backend's kernel:")
+    for name in BACKENDS:
+        cb = by[name]
+        tag = (f"  BORROWED from {cb.borrowed_from}: no {name} kernel measured"
+               if cb.borrowed_from else "")
+        print(f"  k[{name:<6}] = {cb.k_low:.1f}-{cb.k_high:.1f} {K_UNIT}; "
+              f"{cb.block_threads} threads, {cb.shmem_per_block()} B a block, "
+              f"traffic {cb.traffic:.3f}{tag}")
+    for name in ("cuda", "metal"):
+        print(f"    {name} provenance: {by[name].provenance}")
+    print()
 
     print("PREDICTIONS, not measurements. Every row is computed from the inputs")
     print("shown; a row missing an input carries an interval and says which.\n")
     print(f"{'device':<24}{'lanes':>8}{'GHz':>6}{'GB/s bus':>10}"
           f"{'compute':>16}{'b/width':>9}   decode GB/s   bound")
     for d in DEVICES:
-        comp = d.compute_bound(c)
-        bw = d.bandwidth_bound(c)
-        lo, hi, why = d.predict(c)
-        binds = d.residency_binds(c)
+        cd = constants_for(d, by)
+        comp = d.compute_bound(cd)
+        bw = d.bandwidth_bound(cd)
+        lo, hi, why = d.predict(cd)
+        binds = d.residency_binds(cd)
         if binds:
             why = f"{why} [residency: {binds}]"
         cs = "  unknown" if comp is None else f"{comp[0]:.0f} - {comp[1]:.0f}"
         band = (f"<= {hi:.1f}" if lo <= 0.0
                 else (f"{lo:.1f} - {hi:.1f}" if hi - lo > 0.05 else f"{hi:.1f}"))
-        print(f"{d.name:<24}{(d.resident_lanes(c) or 0):>8}"
+        print(f"{d.name:<24}{(d.resident_lanes(cd) or 0):>8}"
               f"{(d.clock_ghz or 0):>6.2f}{d.gb_s:>10.1f}{cs:>16}{bw:>9.0f}"
-              f"   {band:>12}   {why}")
+              f"   {band:>12}   [{d.backend}] {why}")
     print()
 
     # --- Which term binds, and whether we are entitled to say -----------------
@@ -595,7 +737,7 @@ def _table(codec_cost=None) -> None:
         print("from one launch, and a sweep is what separates a compute-bound from")
         print("a bandwidth-bound reading -- one point fits both.\n")
         for d in DEVICES:
-            m = d.margin(c)
+            m = d.margin(constants_for(d, by))
             if m is None:
                 continue
             if m > 1:
@@ -616,13 +758,17 @@ def _table(codec_cost=None) -> None:
         print("lanes yields whatever closes the arithmetic.\n")
 
     print("A row reading '<= X' is one-sided and must be quoted that way.")
-    print(f"k was measured under partial latency hiding at "
+    print(f"cuda's k was measured under partial latency hiding at "
           f"{c.blocks_at_measurement}+ blocks per unit; a device holding")
     print("fewer hides less of the dependent-load chain, so its effective k")
     print("moves toward the high end or past it and the interval becomes a")
     print("floor. Resident lanes captures the occupancy part of that and not")
     print("the hiding part -- which is why k stays an interval and why these")
-    print("rows may claim a ceiling and not a bracket.\n")
+    print("rows may claim a ceiling and not a bracket.")
+    print(f"metal's k was measured at {by['metal'].blocks_at_measurement}-4 "
+          f"threadgroups per core, and there it RISES with co-residency:")
+    print("co-resident groups contend for the core rather than only hiding")
+    print("each other's latency. Same model, opposite trend; one device each.\n")
 
     print("Does the archive pay, and against which disk?")
     print(f"{'device':<24}", end="")
@@ -634,10 +780,11 @@ def _table(codec_cost=None) -> None:
         print(f"{format(disk, '.2f') + ' GB/s':>14}", end="")
     print()
     for d in DEVICES:
-        lo, _hi, _why = d.predict(c)
+        cd = constants_for(d, by)
+        lo, _hi, _why = d.predict(cd)
         print(f"{d.name:<24}", end="")
         for _name, disk, _src in STORAGE:
-            v = verdict(d, disk, c)
+            v = verdict(d, disk, cd)
             sp = speedup(lo, disk)
             cell = v if sp >= 1 / F_CODED - 1e-9 else f"{v} {sp:.2f}x"
             print(f"{cell:>14}", end="")
@@ -647,7 +794,11 @@ def _table(codec_cost=None) -> None:
     print("than 1/f, so the archive's ratio has become load speed and nothing")
     print("faster helps. 'measure' means the interval straddles that disk. One")
     print("device changes verdict with the disk beside it, which is why a gate")
-    print("calibrated against one machine's NVMe is not a gate.\n")
+    print("calibrated against one machine's NVMe is not a gate.")
+    print("A verdict assumes the route delivers the decoder kernel's rate. On the")
+    print("Apple M4 the kernel does, but lmz's shipped Python path does not: it")
+    print("measured ~2 GB/s there (MEASURED_DECODE), so a Mac route needs a")
+    print("zero-copy decoder interface before its 'pays' holds end to end.\n")
 
     print("Measured decode rates, for comparison (no model involved)")
     for name, v in MEASURED_DECODE.items():
@@ -657,9 +808,22 @@ def _table(codec_cost=None) -> None:
     lo, hi, _ = ref.predict(c)
     print(f"Check: the model predicts {ref.name} at {lo:.0f}-{hi:.0f} GB/s against")
     print(f"{MEASURED_DECODE['lmz CUDA, shared table, RTX 5080']:.0f} measured. That is the")
-    print("one point the constants were taken on, so agreement is a consistency")
-    print("check and not a validation -- the model has not yet been tested against")
-    print("a device it was not fitted on.\n")
+    print("one point cuda's constants were taken on, so agreement is a")
+    print("consistency check and not a validation.")
+    m4 = next(d for d in DEVICES if d.name.startswith("Apple M4"))
+    mlo, mhi, _ = m4.predict(constants_for(m4, by))
+    at40 = MEASURED_DECODE["lmz Metal, shared table, Apple M4, 40 resident threadgroups"]
+    print(f"Likewise {m4.name}: {mlo:.1f}-{mhi:.1f} GB/s predicted with metal's")
+    print(f"constants against {at40:.1f} measured at its residency limit -- again the")
+    print("device those constants came from.")
+    xb = m4.blocks_per_unit(c)
+    print("The one check on a device the constants were NOT fitted on is")
+    print(f"residency: cuda's kernel shape ({c.shmem_per_block()} B, "
+          f"{c.block_threads} threads) on the M4's probed")
+    print(f"pool gives {xb} blocks per core, and probe/metal-bench.js measured 2 per")
+    print("core for that shape by occupancy staircase. The formula transferred;")
+    print("whether cuda's k transfers is not testable there, because that kernel")
+    print("does not run on Metal.\n")
 
     small = DEVICES[-1]
     cpu = MEASURED_DECODE["lmz CPU, 4-16 threads"]
@@ -736,7 +900,12 @@ def _table(codec_cost=None) -> None:
     print("whether decode stays linear in resident lanes down to 2 CUs, and how")
     print("a unified-memory part behaves with the CPU on the same bus. The clock")
     print("is derived from an FMA measurement rather than queried. So this is a")
-    print("floor on the MODEL, and the model is what is untested here.")
+    print("floor on the MODEL, and the model is what is untested here. Its k is")
+    print("also borrowed from cuda: no Vulkan kernel has been measured.")
+    print("The one unified-memory part measured, an Apple M4, lost 17-29% of its")
+    print("decode rate to a CPU streaming 71-81 GB/s on the same bus, although")
+    print("DRAM was not what bound it -- so on a small part the floor above may")
+    print("not hold under load, and nothing here says by how much.")
     print()
     print("This row has now been stated three different ways in one day -- 4-36,")
     print("then <= 7.8, then <= 1.9 -- each time because a shared-memory number")

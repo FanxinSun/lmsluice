@@ -2303,6 +2303,76 @@ class TestGateModel(unittest.TestCase):
         self.assertEqual(lo, 0.0, "a below-measurement occupancy grew a floor")
         self.assertIn("read off the device", why)
         self.assertNotIn("assumed", why)
+        # And predicting a metal device with cuda's constants is a projection,
+        # which the row must say rather than read like its own kernel's cost.
+        self.assertIn("projection", why)
+
+    def test_each_device_is_predicted_with_its_own_backend(self):
+        """Constants are per kernel, and the kernels differ by backend.
+
+        lmz's Metal shared kernel is not CUDA k_shared ported: 128 threads,
+        direct refill reads, 19,456 B compiled. Its k measured 269-313 on the
+        Apple M4 where CUDA's is 217-248, so the M4 row has to be predicted with
+        metal's constants -- and with them it lands on the rate measured at the
+        residency limit, which CUDA's constants could only bound from above.
+        """
+        by = self.gate.constants_by_backend()
+        m4 = [d for d in self.gate.DEVICES if d.name.startswith("Apple M4")][0]
+        c = self.gate.constants_for(m4, by)
+        self.assertEqual(c.backend, "metal")
+        self.assertIsNone(c.borrowed_from)
+        # The fallback reproduces the footprint the compiled pipeline reported.
+        self.assertEqual(c.shmem_per_block(), 19_456)
+        self.assertEqual(m4.blocks_per_unit(c), 4,
+                         "the probe and the decoder sweep both measured 4")
+        lo, hi, why = m4.predict(c)
+        measured = self.gate.MEASURED_DECODE[
+            "lmz Metal, shared table, Apple M4, 40 resident threadgroups"]
+        self.assertLessEqual(lo, measured)
+        self.assertGreaterEqual(hi, measured)
+        self.assertIn("compute", why)
+        self.assertNotIn("BORROWED", why)
+        self.assertNotIn("projection", why)
+
+    def test_a_backend_with_no_measured_kernel_borrows_visibly(self):
+        """No Vulkan kernel has been measured, so its rows borrow cuda's k.
+
+        Borrowing is allowed; borrowing silently is not. The row is otherwise
+        indistinguishable from one predicted with its own kernel's cost.
+        """
+        by = self.gate.constants_by_backend()
+        small = [d for d in self.gate.DEVICES if "2-CU" in d.name][0]
+        self.assertEqual(small.backend, "vulkan")
+        c = self.gate.constants_for(small, by)
+        self.assertEqual(c.borrowed_from, "cuda")
+        _lo, _hi, why = small.predict(c)
+        self.assertIn("BORROWED", why)
+        # A backend missing from the table entirely borrows too, never silently.
+        c2 = self.gate.constants_for(small, {"cuda": by["cuda"]})
+        self.assertEqual(c2.borrowed_from, "cuda")
+        with self.assertRaises(ValueError):
+            self.gate.cost_from(None, "opencl")
+
+    def test_lmz_backend_records_reach_the_curve_separately(self):
+        """The adapter asks lmz for each backend's own record.
+
+        An lmz that publishes no Metal record must yield none -- not cuda's
+        under a Metal name -- and the curve then falls back to its own metal
+        constants, visibly.
+        """
+        from lmsluice.lmzcodec import LmzCodec
+
+        cuda = LmzCodec.cost_model(None)
+        metal = LmzCodec.cost_model(None, backend="metal")
+        cm = self.gate.cost_from(metal, "metal")
+        self.assertEqual(cm.backend, "metal")
+        self.assertEqual(cm.shmem_per_block(), 19_456)
+        if metal.k.low is not None and cuda.k.low is not None:
+            self.assertNotEqual((metal.k.low, metal.k.high),
+                                (cuda.k.low, cuda.k.high),
+                                "the metal record is cuda's under another name")
+        else:
+            self.assertIn("fallback", cm.provenance)
 
     def test_it_still_runs_with_nothing_installed(self):
         """The whole point is that it can be copied onto someone else's box."""

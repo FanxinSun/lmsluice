@@ -25,28 +25,45 @@ the one bug this project cannot have.
 Which makes the rule concrete and unusually sharp here:
 
 - **The gate is a curve, not a table of devices.** `gate.py` holds it:
-  `decode_rate = min(C / k, BW / (1 + f))` against *that machine's*
-  storage rate. Device rows are samples of the curve, and the FLOP-per-byte
-  ratio `C / BW` decides only which of the two terms binds.
-- **`k` — the decoder's compute cost per decoded byte — is not measured.**
-  One point on one device (418 GB/s on an RTX 5080) fits both readings:
-  it is 84% of that card's bandwidth bound *and* it defines `k = 128` if
-  compute binds. The two readings differ by 8× on a 2-CU iGPU. Scaling
-  that point by FP32 throughput assumes the answer. Pinning `k` on one
-  low-FLOP/byte device is the highest-value measurement this repository
-  can make.
-- **Compare against the machine's own disk.** 6.34 GB/s is this box's
-  Gen4 NVMe under WSL2. A SATA SSD is a tenth of it, phone UFS a third,
+  `decode = min(resident_lanes × clock / k, peak_DRAM × achieved_fraction /
+  (1 + 1/expansion))` against *that machine's* storage rate. Device rows
+  are samples of the curve. Which term binds is a property of the device,
+  and residency comes from the device's own shared-memory pool, not its cap.
+- **`k` is per kernel, so it is per backend — and it has never been measured
+  on a low-FLOP/byte device.** Two measurements exist, each by a grid sweep
+  at fixed byte traffic:
+  - lmz CUDA `k_shared` on an RTX 5080: 217–248 lane-cycles per decoded
+    byte, bandwidth-bound at full occupancy.
+  - lmz's Metal shared kernel on an Apple M4 (unified memory): 269–313 at
+    the kernel's IOReport-measured clock. It is compute-bound at ~28% of
+    DRAM, and its `k` *rises* with co-residency. A CPU streaming ~80 GB/s on
+    the same bus still slowed it by up to 29%.
+
+  Never carry one backend's `k` to another: CUDA's predicts the M4 26–44% too
+  fast. `gate.py` predicts each row with its own backend's constants and marks
+  borrowed ones; the Vulkan rows borrow today. A 2-CU iGPU, where the founding
+  claim lives, is still unmeasured. Pinning `k` there remains the
+  highest-value measurement this repository can make.
+- **Compare against the machine's own disk.** The WSL2 box's Gen4 NVMe reads
+  6.34 GB/s. On the Apple M4 Mac mini the internal NVMe reads 3.12 GB/s cold
+  and a USB SSD 0.373. A SATA SSD is a tenth of the first, phone UFS a third,
   a Gen5 array twice it. The verdict flips inside that range for the same
-  device.
-- **FP32 FMA is a proxy and the wrong unit.** rANS decoding is integer
-  work with dependent shared-memory loads. `probe/` says so; keep saying
-  so, and treat every rate derived from it as a reason to measure.
+  device. It also assumes the route delivers the kernel's rate: lmz's
+  shipped Python GPU path delivers ~2 GB/s on the M4 against a 25.2 GB/s
+  kernel.
+- **FP32 FMA is a proxy and the wrong unit.** rANS decoding is integer work
+  with dependent shared-memory loads. On the M4 one dependent threadgroup
+  load costs ~69 cycles, and a decode step ~4 of them. `probe/` says so;
+  keep saying so. An FMA rate may check an ALU count, never set a decode
+  rate.
 - **The probe must reach the machines that matter.** Direct3D 11 covers
-  Windows; Vulkan is what reaches AMD and Intel iGPUs on Linux, and Metal
-  the Apple hosts. A probe that needs a toolkit cannot run on the machines
-  it most needs to measure — that constraint is load-bearing, not
-  incidental.
+  Windows (`probe/igpu-bench.ps1`). Metal covers Apple hosts with nothing to
+  install (`probe/metal-bench.js`, JavaScript for Automation via `osascript`;
+  a stock Mac has no Python without the Command Line Tools). Vulkan, for AMD
+  and Intel iGPUs on Linux, is still missing. A probe that needs a toolkit
+  cannot run on the machines it most needs to measure — that constraint is
+  load-bearing, not incidental. A probe that prints *this* machine's numbers
+  on another one is the same bug in a different place.
 
 Label every number with its machine and conditions; mark projections as
 projections; never present "works on this box" as completion.

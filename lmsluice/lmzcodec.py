@@ -207,7 +207,7 @@ class LmzCodec:
         return Capabilities(host=True, device=ok > 0, device_share=ok / total,
                             why_not=why, advice=advice, derived=True)
 
-    def cost_model(self) -> CodecCost:
+    def cost_model(self, backend: str = "cuda") -> CodecCost:
         """lmz's decoder cost constants, read from the codec where it publishes
         them and derived only where it does not.
 
@@ -237,7 +237,12 @@ class LmzCodec:
             from ._lmz import require
 
             (gpu,) = require("gpu")
-            published = gpu.cost_model()
+            # `backend` asks for that backend's kernel. lmz's kernels differ in
+            # shape by backend, so their costs are separate records; an lmz
+            # that predates the keyword knows only the cuda one, and a request
+            # for any other backend then gets no record rather than cuda's.
+            published = (gpu.cost_model() if backend == "cuda"
+                         else gpu.cost_model(backend=backend))
         except Exception:                 # noqa: BLE001 -- older lmz, or none
             published = None
 

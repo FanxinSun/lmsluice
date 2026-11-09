@@ -1,7 +1,8 @@
 # Category 1 Re-run Report: Inference Delivery (SLUICE-USE-0 Evidence)
 
-> **Status (2026-11-09): manager-audited evidence, not qualification.** Executed by the agy executor in three audited rounds
-> (raw rows `results/cat1_rerun/runs.jsonl`, 54 rows, append-only). SLUICE-USE-0 stays HELD in [PLAN.md](../../plan/PLAN.md).
+> **Status (2026-11-09): manager-audited evidence; the basis of SLUICE-USE-0's bounded qualification.** The USB SSD route is qualified
+> (see [PLAN.md](../../plan/PLAN.md) row 3); the internal-NVMe route is not. Executed by the agy executor in three audited rounds
+> (raw rows `results/cat1_rerun/runs.jsonl`, 54 rows, append-only).
 > Not measured here: the coded arm's read stage separately from MPS ingest (so the gate's decode term is unchecked),
 > a true warm cache, energy/thermal, and any machine other than this one. Supersedes
 > [category1_inference_report.md](category1_inference_report.md).
