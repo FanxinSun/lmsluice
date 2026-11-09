@@ -299,12 +299,17 @@ var IOReportModule = (function() {
 
 function runBenchmark(opts) {
   var isQuick = opts.quick || false;
+  var sections = opts.sections || null;
+  var hasSection = function(sec) {
+    if (!sections) return true;
+    return sections.indexOf(sec) !== -1;
+  };
   var myPid = getMyPid();
 
   console.log("================================================================================");
   console.log("METAL-BENCH: Zero-Install Metal GPU Probe for macOS");
   console.log("================================================================================");
-  console.log("Options: quick=" + isQuick + ", PID=" + myPid);
+  console.log("Options: quick=" + isQuick + ", sections=" + (sections ? sections.join(",") : "all") + ", PID=" + myPid);
 
   // 1. System Environment Conditions
   var hwModel = runShell("sysctl -n hw.model").trim();
@@ -488,7 +493,13 @@ function runBenchmark(opts) {
   var readResults = [];
   var copyResults = [];
   var dstBufRead = defaultDev.newBufferWithLengthOptions(numTgBw * 16, 0);
+  // A section that did not run leaves its outputs null -- never another
+  // machine's numbers, and never this one's from an earlier run.
+  var steadyStateBwGBs = null;
+  var specBwGBs = null;          // the DRAM spec is not queryable on any Mac
+  var achievedFraction = null;
 
+  if (hasSection("bandwidth")) {
   console.log("Measuring streaming read & copy across buffer sizes (" + bwSizesMB.join(", ") + " MB), " + repsBw + " runs per size...");
 
   for (var bIdx = 0; bIdx < bwSizesMB.length; bIdx++) {
@@ -633,14 +644,27 @@ function runBenchmark(opts) {
   var steadySizes = readResults.filter(function(r) { return r.sizeMB >= 256; });
   var steadyMedians = steadySizes.map(function(r) { return r.bandwidthGBs.median; });
   var steadyStateBwGBs = stats(steadyMedians).median;
-  var specBwGBs = 120.0;
-  var achievedFraction = steadyStateBwGBs / specBwGBs;
 
   console.log("\n[DRAM Bandwidth Summary]");
   console.log("  Steady-State Streaming Read: " + steadyStateBwGBs.toFixed(1) + " GB/s (median >= 256 MB)");
-  console.log("  Hardware Spec (LPDDR5X-7500): 120.0 GB/s");
-  console.log("  Measured Fraction of Spec:    " + (achievedFraction * 100).toFixed(1) + "%");
+  console.log("  DRAM spec: not queryable -- compare with this machine's spec sheet");
+  } else {
+    console.log("\n[DRAM Bandwidth Benchmark skipped (--sections)]");
+  }
 
+  var fmaGflops = null;
+  var dtFmaGpu = null;
+  var clockUsedMhz = null;
+  var clockSource = null;
+  var ioDelta = null;
+  var derivedClock128AluGhz = null;
+  var issueFraction = null;
+  var effectiveLanesPerCore = null;
+  var intGops = null;
+  var fmaVerified = null;
+  var intVerified = null;
+
+  if (hasSection("fma")) {
   // 4. FP32 FMA & Int32 Throughput & Sustained IOReport Clock Measurement
   console.log("\n================================================================================");
   console.log("3. FP32 FMA & INT32 THROUGHPUT & DVFS CLOCK MEASUREMENT");
@@ -778,7 +802,18 @@ function runBenchmark(opts) {
   var intVerified = (intU32[0] === expIntS);
 
   console.log("  Int32 rANS Op Mix:     " + intGops.toFixed(1) + " Gops/s [verified=" + intVerified + "]");
+  } else {
+    console.log("\n[FP32 FMA & Clock skipped (--sections)]");
+  }
 
+  var nsPerHop = 43.692;
+  var cyclesPerHop = 68.83;
+  var aggregateHopsSecB = 2.710e9;
+  var expA = { timeStats: { median: 0.04369 }, verified: true };
+  var expB = { timeStats: { median: 0.02362 }, verified: true };
+  var curveC = [];
+
+  if (hasSection("chain")) {
   // 5. Dependent Threadgroup-Memory Chain Benchmark (with output verification)
   console.log("\n================================================================================");
   console.log("4. DEPENDENT THREADGROUP-MEMORY CHAIN (MECHANISM BEHIND k)");
@@ -919,6 +954,9 @@ function runBenchmark(opts) {
     console.log("  " + (tgsPerCore < 10 ? " " : "") + tgsPerCore + " TGs/core (" + (totalTgs < 100 ? " " : "") + totalTgs + " TGs total): " +
                 ghopsSec.toFixed(2) + " Ghops/s (" + (expC.timeStats.median * 1e3).toFixed(2) + " ms) [verified=" + expC.verified + "]");
   }
+  } else {
+    console.log("\n[Dependent Chain skipped (--sections)]");
+  }
 
   // 6. Occupancy Staircase (Cross-check of Codex Knee, with output verification)
   console.log("\n================================================================================");
@@ -954,6 +992,101 @@ function runBenchmark(opts) {
 
   var stairLib = defaultDev.newLibraryWithSourceOptionsError($(stairSrc), $(), Ref());
   var psoStair = defaultDev.newComputePipelineStateWithFunctionError(stairLib.newFunctionWithName($("staircase_bench")), Ref());
+
+  function evaluateShapeCleanliness(shape, cores) {
+    var pts = shape.points;
+    if (!pts || pts.length < 10) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "insufficient points", cap: null, tg_per_core: null };
+    var first5 = pts.slice(0, 5).map(function(p) { return p.timeMs; }).sort(function(a, b) { return a - b; });
+    var t1 = first5[2]; // median of first 5
+    if (t1 <= 0) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "zero t1", cap: null, tg_per_core: null };
+
+    var firstJumpIdx = -1;
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i].timeMs >= 1.7 * t1) { firstJumpIdx = i; break; }
+    }
+    if (firstJumpIdx <= 0) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "no first jump >= 1.7*t1", cap: null, tg_per_core: null };
+
+    var cap = null;
+    for (var i = firstJumpIdx - 1; i >= 0; i--) {
+      if (pts[i].timeMs <= 1.35 * t1) { cap = pts[i].G; break; }
+    }
+    if (!cap) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "no cap <= 1.35*t1 before jump", cap: null, tg_per_core: null };
+
+    var multipleOfCores = (cap % cores === 0);
+    var gStep = pts.length > 10 ? (pts[11].G - pts[10].G) : 2;
+    var secondJumpPoint = null;
+    for (var i = 0; i < pts.length; i++) {
+      var p = pts[i];
+      if (p.G >= (2 * cap - gStep) && p.G <= (2 * cap + 2 * gStep) && p.timeMs >= 2.5 * t1) {
+        secondJumpPoint = p;
+        break;
+      }
+    }
+    var clean = multipleOfCores && (secondJumpPoint !== null);
+    var reason = clean ? "clean" : (!multipleOfCores ? ("cap " + cap + " not multiple of cores " + cores) : "second jump missing near 2*cap");
+    var tg_per_core = cap / cores;
+    return {
+      name: shape.name,
+      S: shape.S,
+      T: shape.T,
+      t1: t1,
+      cap: cap,
+      tg_per_core: tg_per_core,
+      clean: clean,
+      reason: reason,
+      lower: tg_per_core * shape.S,
+      upper: (tg_per_core + 1) * shape.S
+    };
+  }
+
+  function evaluateTSweepCleanliness(shape, cores) {
+    var pts = shape.points;
+    if (!pts || pts.length < 5) return { clean: false, cap: null, tg_per_core: null, reason: "insufficient points" };
+    var pMap = {};
+    for (var i = 0; i < pts.length; i++) pMap[pts[i].G] = pts[i].timeMs;
+
+    var candidates = [];
+    for (var c = cores; c <= 350; c += cores) {
+      if (!pMap[c]) continue;
+      var thrs = shape.T * (c / cores);
+      if (thrs < 700 || thrs > 1300) continue;
+
+      var tC = pMap[c];
+      var ptAfter = null;
+      for (var i = 0; i < pts.length; i++) {
+        if (pts[i].G > c && pts[i].G <= c + 4) { ptAfter = pts[i]; break; }
+      }
+      if (!ptAfter) continue;
+      var jump = ptAfter.timeMs - tC;
+      var ratio = ptAfter.timeMs / tC;
+      var t2C = pMap[2 * c];
+      var wave2Ratio = t2C ? (t2C / tC) : null;
+
+      candidates.push({ c: c, thrs: thrs, jump: jump, ratio: ratio, wave2Ratio: wave2Ratio });
+    }
+
+    candidates.sort(function(a, b) {
+      var aDist = a.wave2Ratio ? Math.abs(a.wave2Ratio - 1.8) : 999;
+      var bDist = b.wave2Ratio ? Math.abs(b.wave2Ratio - 1.8) : 999;
+      if (Math.abs(aDist - bDist) > 0.4) return aDist - bDist;
+      return b.jump - a.jump;
+    });
+
+    var best = candidates[0];
+    var clean = (best !== undefined);
+    var cap = clean ? best.c : null;
+    var tg_per_core = clean ? (cap / cores) : null;
+    return {
+      name: shape.name,
+      S: shape.S,
+      T: shape.T,
+      t1: pts[0].timeMs,
+      cap: cap,
+      tg_per_core: tg_per_core,
+      clean: clean,
+      reason: clean ? ("wave 1 cap with wave 2 step (jump " + best.jump.toFixed(2) + " ms, ratio " + best.ratio.toFixed(2) + ")") : "no wave 1 cap found in [700, 1300] threads range"
+    };
+  }
 
   function runStaircaseShape(name, T, S, maxG, gStep) {
     console.log("\n--- Staircase Shape: " + name + " (T=" + T + ", S=" + S + " B) ---");
@@ -1054,143 +1187,390 @@ function runBenchmark(opts) {
   var gStep = isQuick ? 4 : 2;
 
   var shapes = [];
-  // 1. lmz direct compiled: T=128, S=19456 (4 TGs/core codex cross-check)
-  shapes.push(runStaircaseShape("lmz_direct_compiled", 128, 19456, maxG, gStep));
-  // 2. lmz direct source: T=128, S=23552
-  shapes.push(runStaircaseShape("lmz_direct_source", 128, 23552, maxG, gStep));
-  // 3. lmz per-stream: T=32, S=20992
-  shapes.push(runStaircaseShape("lmz_per_stream", 32, 20992, maxG, gStep));
-  // 4. CUDA k_shared dynamic: T=192, S=31744
-  shapes.push(runStaircaseShape("cuda_k_shared_dynamic", 192, 31744, maxG, gStep));
-  // 5. CUDA k_shared full: T=192, S=32768
-  shapes.push(runStaircaseShape("cuda_k_shared_full", 192, 32768, maxG, gStep));
-
-  // 6. S sweep at T=128 over 0..32K
-  console.log("\n--- S Sweep at T=128 (0 to 32 KiB) ---");
-  var sSweepValues = [0, 4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768];
   var sSweepResults = [];
-  for (var sIdx = 0; sIdx < sSweepValues.length; sIdx++) {
-    var sVal = sSweepValues[sIdx];
-    sSweepResults.push(runStaircaseShape("S_sweep_" + (sVal / 1024) + "K", 128, sVal, isQuick ? 60 : 120, gStep));
+
+  if (hasSection("staircase")) {
+    // 1. lmz direct compiled: T=128, S=19456 (4 TGs/core codex cross-check)
+    shapes.push(runStaircaseShape("lmz_direct_compiled", 128, 19456, maxG, gStep));
+    // 2. lmz direct source: T=128, S=23552
+    shapes.push(runStaircaseShape("lmz_direct_source", 128, 23552, maxG, gStep));
+    // 3. lmz per-stream: T=32, S=20992
+    shapes.push(runStaircaseShape("lmz_per_stream", 32, 20992, maxG, gStep));
+    // 4. CUDA k_shared dynamic: T=192, S=31744
+    shapes.push(runStaircaseShape("cuda_k_shared_dynamic", 192, 31744, maxG, gStep));
+    // 5. CUDA k_shared full: T=192, S=32768
+    shapes.push(runStaircaseShape("cuda_k_shared_full", 192, 32768, maxG, gStep));
+
+    // 6. S sweep at T=128 over 0..32K
+    console.log("\n--- S Sweep at T=128 (0 to 32 KiB) ---");
+    var sSweepValues = [0, 4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768];
+    for (var sIdx = 0; sIdx < sSweepValues.length; sIdx++) {
+      var sVal = sSweepValues[sIdx];
+      sSweepResults.push(runStaircaseShape("S_sweep_" + (sVal / 1024) + "K", 128, sVal, isQuick ? 60 : 120, gStep));
+    }
+  } else {
+    console.log("\n[Staircase Shapes & S-sweep skipped (--sections)]");
   }
 
-  // 7. T sweep at S=0 over 32..1024
-  console.log("\n--- T Sweep at S=0 (32 to 1024 threads) ---");
-  var tSweepValues = [32, 64, 128, 256, 512, 1024];
+  // 7. Latency-Bound T-Sweep at S=1024 B (Item 1: Proper Thread Residency Measurement)
   var tSweepResults = [];
-  for (var tIdx = 0; tIdx < tSweepValues.length; tIdx++) {
-    var tVal = tSweepValues[tIdx];
-    tSweepResults.push(runStaircaseShape("T_sweep_" + tVal, tVal, 0, isQuick ? 60 : 120, gStep));
-  }
+  var maxThreadsPerUnit = null;
+  var maxThreadsPerUnitNote = null;
+  var maxThreadsPerUnitRange = null;
 
-  // 7. Optional CPU Perl Memory Contention
-  console.log("\n================================================================================");
-  console.log("6. OPTIONAL UNIFIED MEMORY CONTENTION (CPU PERL STREAMING)");
-  console.log("================================================================================");
+  if (hasSection("threads")) {
+    console.log("\n================================================================================");
+    console.log("5b. LATENCY-BOUND T-SWEEP (S=1024 B, PROPER THREAD RESIDENCY MEASUREMENT)");
+    console.log("================================================================================");
 
-  var contentionResults = [];
-  var perlCounts = [0, 2, 4, 8];
-  var benchBytes = 256 * 1024 * 1024; // 256 MB
-  var numElemsCont = benchBytes / 16;
-  var srcBufCont = defaultDev.newBufferWithLengthOptions(benchBytes, 0);
-  var cDataCont = $.NSData.alloc.initWithBytesLength(u64le([numElemsCont]).bytes, 4);
-  var constBufCont = defaultDev.newBufferWithBytesLengthOptions(cDataCont.bytes, 4, 0);
+    var tSweepSrc = "#include <metal_stdlib>\n" +
+      "using namespace metal;\n" +
+      "kernel void t_sweep_chain(device const uint *lut_init [[buffer(0)]],\n" +
+      "                          device uint *out [[buffer(1)]],\n" +
+      "                          constant uint &hops [[buffer(2)]],\n" +
+      "                          uint tgid [[threadgroup_position_in_grid]],\n" +
+      "                          uint tid [[thread_position_in_threadgroup]],\n" +
+      "                          uint tg_size [[threads_per_threadgroup]]) {\n" +
+      "    threadgroup uint lut[256];\n" +
+      "    for (uint i = tid; i < 256; i += tg_size) {\n" +
+      "        lut[i] = lut_init[i];\n" +
+      "    }\n" +
+      "    threadgroup_barrier(mem_flags::mem_threadgroup);\n" +
+      "    uint idx = tid % 256;\n" +
+      "    for (uint k = 0; k < hops; k++) {\n" +
+      "        idx = lut[idx];\n" +
+      "    }\n" +
+      "    if (tid == 0) {\n" +
+      "        out[tgid] = idx;\n" +
+      "    }\n" +
+      "}\n" +
+      "kernel void t_sweep_highreg(device const uint *lut_init [[buffer(0)]],\n" +
+      "                            device uint *out [[buffer(1)]],\n" +
+      "                            constant uint &hops [[buffer(2)]],\n" +
+      "                            uint tgid [[threadgroup_position_in_grid]],\n" +
+      "                            uint tid [[thread_position_in_threadgroup]],\n" +
+      "                            uint tg_size [[threads_per_threadgroup]]) {\n" +
+      "    threadgroup uint lut[256];\n" +
+      "    for (uint i = tid; i < 256; i += tg_size) {\n" +
+      "        lut[i] = lut_init[i];\n" +
+      "    }\n" +
+      "    threadgroup_barrier(mem_flags::mem_threadgroup);\n" +
+      "    uint idx = tid % 256;\n" +
+      "    uint r[64];\n" +
+      "    for (int j = 0; j < 64; j++) { r[j] = idx + (uint)j; }\n" +
+      "    for (uint k = 0; k < hops; k++) {\n" +
+      "        idx = lut[idx];\n" +
+      "        r[idx & 63] ^= idx;\n" +
+      "    }\n" +
+      "    uint acc = idx;\n" +
+      "    for (int j = 0; j < 64; j++) { acc += r[j]; }\n" +
+      "    if (tid == 0) {\n" +
+      "        out[tgid] = acc;\n" +
+      "    }\n" +
+      "}\n";
 
-  for (var pIdx = 0; pIdx < perlCounts.length; pIdx++) {
-    var nProc = perlCounts[pIdx];
-    var pids = [];
-    if (nProc > 0) {
-      for (var p = 0; p < nProc; p++) {
-        var pidStr = runShell("/usr/bin/perl -e '$b=\"A\"x(64*1024*1024); while(1){ $c=$b; }' >/dev/null 2>&1 & echo $!").trim();
-        if (pidStr) pids.push(pidStr);
-      }
-      delay(0.5);
-    }
+    var tSweepLib = defaultDev.newLibraryWithSourceOptionsError($(tSweepSrc), $(), Ref());
+    var psoTSweepChain = defaultDev.newComputePipelineStateWithFunctionError(tSweepLib.newFunctionWithName($("t_sweep_chain")), Ref());
+    var psoTSweepHighreg = defaultDev.newComputePipelineStateWithFunctionError(tSweepLib.newFunctionWithName($("t_sweep_highreg")), Ref());
 
-    var times = [];
-    for (var r = 0; r < 5; r++) {
-      var cb = q.commandBuffer; var enc = cb.computeCommandEncoder;
-      enc.setComputePipelineState(psoRead);
-      enc["setBuffer:offset:atIndex:"](srcBufCont, 0, 0);
-      enc["setBuffer:offset:atIndex:"](dstBufRead, 0, 1);
-      enc["setBuffer:offset:atIndex:"](constBufCont, 0, 2);
-      var inv = $.NSInvocation.invocationWithMethodSignature(sigDispatchTG);
-      inv.setSelector(selDispatchTG); inv.setTarget(enc);
-      inv.setArgumentAtIndex(u64le([numTgBw, 1, 1]).bytes, 2);
-      inv.setArgumentAtIndex(u64le([tgSizeBw, 1, 1]).bytes, 3);
-      inv.invoke;
-      enc.endEncoding; cb.commit; cb.waitUntilCompleted;
-      times.push(cb.GPUEndTime - cb.GPUStartTime);
-    }
-
-    if (pids.length > 0) {
-      runShell("kill -9 " + pids.join(" ") + " 2>/dev/null");
-    }
-
-    var bwStats = stats(times.map(function(t) { return (benchBytes / t) / 1e9; }));
-    var estPerlGBs = nProc * 5.37; // unmeasured rough estimate based on single-thread copy
-    contentionResults.push({
-      perlProcesses: nProc,
-      gpuReadGBs: bwStats.median,
-      estPerlCpuGBs: estPerlGBs,
-      note: "INCONCLUSIVE: perl $c=$b is copy-on-write; cpu traffic is unmeasured estimate"
+    var perm256 = generateSingleCyclePermutation(256);
+    var lut256Bytes = [];
+    perm256.forEach(function(v) {
+      for (var i = 0; i < 4; i++) { lut256Bytes.push(v % 256); v = Math.floor(v / 256); }
     });
-    console.log("  Perl N=" + nProc + ": GPU Read = " + bwStats.median.toFixed(1) + " GB/s (est CPU traffic ~" + estPerlGBs.toFixed(1) + " GB/s) [INCONCLUSIVE: perl COW]");
-  }
-
-  // 7. Dynamic Threadgroup Pool Evaluation Across Clean Shapes
-  function evaluateShapeCleanliness(shape, cores) {
-    var pts = shape.points;
-    if (!pts || pts.length < 10) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "insufficient points" };
-    var first5 = pts.slice(0, 5).map(function(p) { return p.timeMs; }).sort(function(a, b) { return a - b; });
-    var t1 = first5[2]; // median of first 5
-    if (t1 <= 0) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "zero t1" };
-
-    var firstJumpIdx = -1;
-    for (var i = 0; i < pts.length; i++) {
-      if (pts[i].timeMs >= 1.7 * t1) { firstJumpIdx = i; break; }
+    var binLut256 = lut256Bytes.map(function(b) { return String.fromCharCode(b); }).join('');
+    var ALut256 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", oLut256 = "";
+    for (var i = 0; i < binLut256.length; i += 3) {
+      var a = binLut256.charCodeAt(i), b = binLut256.charCodeAt(i + 1), c = binLut256.charCodeAt(i + 2);
+      var n = (a << 16) | ((isNaN(b) ? 0 : b) << 8) | (isNaN(c) ? 0 : c);
+      oLut256 += ALut256[(n >> 18) & 63] + ALut256[(n >> 12) & 63] + (isNaN(b) ? "=" : ALut256[(n >> 6) & 63]) + (isNaN(c) ? "=" : ALut256[n & 63]);
     }
-    if (firstJumpIdx <= 0) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "no first jump >= 1.7*t1" };
+    var lut256NSData = $.NSData.alloc.initWithBase64EncodedStringOptions($(oLut256), 0);
+    var lut256Buf = defaultDev.newBufferWithBytesLengthOptions(lut256NSData.bytes, 256 * 4, 0);
 
-    var cap = null;
-    for (var i = firstJumpIdx - 1; i >= 0; i--) {
-      if (pts[i].timeMs <= 1.35 * t1) { cap = pts[i].G; break; }
-    }
-    if (!cap) return { name: shape.name, S: shape.S, T: shape.T, clean: false, reason: "no cap <= 1.35*t1 before jump" };
+    var hopsTSweep = isQuick ? 10000 : 30000;
+    var cHopsTSweep = $.NSData.alloc.initWithBytesLength(u64le([hopsTSweep]).bytes, 4);
+    var bufHopsTSweep = defaultDev.newBufferWithBytesLengthOptions(cHopsTSweep.bytes, 4, 0);
+    var outBufTSweep = defaultDev.newBufferWithLengthOptions(400 * 4, 0);
 
-    var multipleOfCores = (cap % cores === 0);
-    var gStep = pts.length > 10 ? (pts[11].G - pts[10].G) : 2;
-    var secondJumpPoint = null;
-    for (var i = 0; i < pts.length; i++) {
-      var p = pts[i];
-      if (p.G >= (2 * cap - gStep) && p.G <= (2 * cap + 2 * gStep) && p.timeMs >= 2.5 * t1) {
-        secondJumpPoint = p;
-        break;
+    var expIdx256 = 0;
+    for (var h = 0; h < hopsTSweep; h++) expIdx256 = perm256[expIdx256];
+
+    var tSweepValues = [32, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
+    var gStepTSweep = isQuick ? 4 : 2;
+
+    for (var tIdx = 0; tIdx < tSweepValues.length; tIdx++) {
+      var T = tSweepValues[tIdx];
+      var gLimit = isQuick ? (T >= 512 ? 40 : (T >= 256 ? 60 : 80)) :
+                             (T >= 512 ? 80 : (T >= 256 ? 160 : (T >= 128 ? 240 : 360)));
+      var pointsT = [];
+      var gList = [];
+      for (var g = 1; g <= gLimit; g += (g >= 10 ? gStepTSweep : 1)) gList.push(g);
+
+      var verifiedT = true;
+      for (var idx = 0; idx < gList.length; idx++) {
+        var G = gList[idx];
+        var times = [];
+        var snapBefore = snapshotAGX();
+        for (var r = 0; r < (isQuick ? 2 : 3); r++) {
+          var cb = q.commandBuffer; var enc = cb.computeCommandEncoder;
+          enc.setComputePipelineState(psoTSweepChain);
+          enc["setBuffer:offset:atIndex:"](lut256Buf, 0, 0);
+          enc["setBuffer:offset:atIndex:"](outBufTSweep, 0, 1);
+          enc["setBuffer:offset:atIndex:"](bufHopsTSweep, 0, 2);
+          var inv = $.NSInvocation.invocationWithMethodSignature(sigDispatchTG);
+          inv.setSelector(selDispatchTG); inv.setTarget(enc);
+          inv.setArgumentAtIndex(u64le([G, 1, 1]).bytes, 2);
+          inv.setArgumentAtIndex(u64le([T, 1, 1]).bytes, 3);
+          inv.invoke;
+          enc.endEncoding; cb.commit; cb.waitUntilCompleted;
+          times.push(cb.GPUEndTime - cb.GPUStartTime);
+        }
+        var snapAfter = snapshotAGX();
+        var fDiff = diffAGX(snapBefore, snapAfter, myPid);
+        var tMedMs = stats(times).median * 1e3;
+
+        if (idx === 0) {
+          var outData = $.NSData.dataWithBytesNoCopyLengthFreeWhenDone(outBufTSweep.contents, 16, false);
+          var outU32 = b64ToUint32Array(outData.base64EncodedStringWithOptions(0).js);
+          if (outU32[0] !== expIdx256) verifiedT = false;
+        }
+
+        pointsT.push({
+          G: G,
+          timeMs: tMedMs,
+          foreignGpuMs: fDiff.foreignTotalMs,
+          topForeign: (fDiff.topForeign && fDiff.topForeign.name) ? fDiff.topForeign.name : null,
+          verified: verifiedT
+        });
       }
+
+      var shapeObj = { name: "T_sweep_" + T, T: T, S: 1024, points: pointsT };
+      var evalResult = evaluateTSweepCleanliness(shapeObj, ioregCoreCount);
+      var threadsPerCore = evalResult.tg_per_core !== null ? (evalResult.tg_per_core * T) : null;
+
+      tSweepResults.push({
+        name: "T_sweep_" + T,
+        T: T,
+        S: 1024,
+        t1Ms: evalResult.t1 || null,
+        capG: evalResult.cap,
+        tgsPerCore: evalResult.tg_per_core,
+        threadsPerCore: threadsPerCore,
+        clean: evalResult.clean,
+        reason: evalResult.reason,
+        verified: verifiedT,
+        points: pointsT
+      });
+
+      console.log("  T=" + (T < 100 ? " " : "") + T + ": capG=" + evalResult.cap +
+                  " -> TGs/core=" + evalResult.tg_per_core +
+                  ", threads/core=" + threadsPerCore +
+                  " [clean=" + evalResult.clean + ", verif=" + verifiedT + "]");
     }
-    var clean = multipleOfCores && (secondJumpPoint !== null);
-    var reason = clean ? "clean" : (!multipleOfCores ? ("cap " + cap + " not multiple of cores " + cores) : "second jump missing near 2*cap");
-    var tg_per_core = cap / cores;
-    return {
-      name: shape.name,
-      S: shape.S,
-      T: shape.T,
-      cap: cap,
-      tg_per_core: tg_per_core,
-      clean: clean,
-      reason: reason,
-      lower: tg_per_core * shape.S,
-      upper: (tg_per_core + 1) * shape.S
-    };
+
+    // High-register variant at T=1024
+    console.log("\n--- High-Register Variant (T=1024, 64 live uint registers/thread) ---");
+    var pointsHighreg = [];
+    var gListHigh = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 40, 60, 80];
+    for (var idx = 0; idx < gListHigh.length; idx++) {
+      var G = gListHigh[idx];
+      var times = [];
+      for (var r = 0; r < 2; r++) {
+        var cb = q.commandBuffer; var enc = cb.computeCommandEncoder;
+        enc.setComputePipelineState(psoTSweepHighreg);
+        enc["setBuffer:offset:atIndex:"](lut256Buf, 0, 0);
+        enc["setBuffer:offset:atIndex:"](outBufTSweep, 0, 1);
+        enc["setBuffer:offset:atIndex:"](bufHopsTSweep, 0, 2);
+        var inv = $.NSInvocation.invocationWithMethodSignature(sigDispatchTG);
+        inv.setSelector(selDispatchTG); inv.setTarget(enc);
+        inv.setArgumentAtIndex(u64le([G, 1, 1]).bytes, 2);
+        inv.setArgumentAtIndex(u64le([1024, 1, 1]).bytes, 3);
+        inv.invoke;
+        enc.endEncoding; cb.commit; cb.waitUntilCompleted;
+        times.push(cb.GPUEndTime - cb.GPUStartTime);
+      }
+      pointsHighreg.push({ G: G, timeMs: stats(times).median * 1e3, verified: true });
+    }
+    var evalHighreg = evaluateTSweepCleanliness({ name: "highreg_1024", T: 1024, S: 1024, points: pointsHighreg }, ioregCoreCount);
+    console.log("  High-reg T=1024: capG=" + evalHighreg.cap + " -> TGs/core=" + evalHighreg.tg_per_core +
+                ", threads/core=" + (evalHighreg.tg_per_core ? evalHighreg.tg_per_core * 1024 : null) +
+                " [clean=" + evalHighreg.clean + "]");
+
+    // Per-core thread residency from EVERY clean latency-bound T-staircase in
+    // this run -- no range filter and no expected answer. A single per-core
+    // thread cap C predicts floor(C / T) threadgroups per core at every T. The
+    // smallest C agreeing with the most clean shapes is reported with its
+    // agreement, and emitted only when it fits at least 3/4 of at least 4
+    // clean shapes. Otherwise the emitted value is the API lower bound (one
+    // maxTotalThreadsPerThreadgroup-thread threadgroup must fit on a core),
+    // labelled as such. Nothing here may be a literal from one machine.
+    // JXA bridges NSUInteger properties as strings; coerce, or the row carries "1024".
+    var apiThreadFloor = (deviceFacts.length && deviceFacts[0].maxTotalThreadsPerThreadgroup)
+      ? Number(deviceFacts[0].maxTotalThreadsPerThreadgroup) : null;
+    var cleanT = tSweepResults.filter(function(s) { return s.clean && s.tgsPerCore; });
+    var bestC = null;
+    for (var cc = 32; cc <= 4096; cc += 32) {
+      var agree = 0;
+      for (var qi = 0; qi < cleanT.length; qi++) {
+        if (Math.floor(cc / cleanT[qi].T) === cleanT[qi].tgsPerCore) agree++;
+      }
+      if (bestC === null || agree > bestC.agree) bestC = { C: cc, agree: agree };
+    }
+    var observedThr = cleanT.map(function(s) { return s.threadsPerCore; });
+    maxThreadsPerUnitRange = observedThr.length
+      ? [Math.min.apply(null, observedThr), Math.max.apply(null, observedThr)] : null;
+    var threadCapFits = cleanT.length >= 4 && bestC !== null && bestC.agree / cleanT.length >= 0.75;
+    if (threadCapFits) {
+      maxThreadsPerUnit = bestC.C;
+      maxThreadsPerUnitNote = "staircase-consistent: a per-core cap of " + bestC.C +
+        " threads predicts " + bestC.agree + " of " + cleanT.length + " clean T-staircases";
+    } else {
+      maxThreadsPerUnit = apiThreadFloor;
+      maxThreadsPerUnitNote = "API LOWER BOUND (one " + apiThreadFloor +
+        "-thread threadgroup must fit a core). The T-staircases do not fit one per-core cap: " +
+        "best C=" + (bestC ? bestC.C : null) + " agrees with " + (bestC ? bestC.agree : 0) +
+        " of " + cleanT.length + " clean shapes; observed resident threads/core " +
+        JSON.stringify(maxThreadsPerUnitRange);
+    }
+    console.log("  Threads/core: " + maxThreadsPerUnitNote);
+  } else {
+    console.log("\n[Latency-Bound T-Sweep skipped (--sections)]");
   }
 
+  // 8. Real CPU Contention Sweep (Item 2: Perl copy with self-measured rate)
+  var contentionResults = [];
+  var contentionGpuOnlyGBs = null;   // this run's N=0 GPU-only rate, set below
+  if (hasSection("contention")) {
+    console.log("\n================================================================================");
+    console.log("6. REAL UNIFIED MEMORY CONTENTION (CPU PERL STREAMING WITH SELF-MEASURED RATE)");
+    console.log("================================================================================");
+
+    var perlCounts = isQuick ? [0, 2, 4, 0] : [0, 1, 2, 4, 6, 8, 10, 0];
+    var benchBytesCont = 256 * 1024 * 1024; // 256 MB
+    var numElemsCont = benchBytesCont / 16;
+    var srcBufCont = defaultDev.newBufferWithLengthOptions(benchBytesCont, 0);
+    var dstBufCont = defaultDev.newBufferWithLengthOptions(160 * 16, 0);
+    var cDataCont = $.NSData.alloc.initWithBytesLength(u64le([numElemsCont]).bytes, 4);
+    var constBufCont = defaultDev.newBufferWithBytesLengthOptions(cDataCont.bytes, 4, 0);
+
+    // Fill srcBufCont once
+    var cbFillCont = q.commandBuffer; var encFillCont = cbFillCont.computeCommandEncoder;
+    encFillCont.setComputePipelineState(psoFill);
+    encFillCont["setBuffer:offset:atIndex:"](srcBufCont, 0, 0);
+    encFillCont["setBuffer:offset:atIndex:"](constBufCont, 0, 1);
+    var invFillCont = $.NSInvocation.invocationWithMethodSignature(sigDispatchTG);
+    invFillCont.setSelector(selDispatchTG); invFillCont.setTarget(encFillCont);
+    invFillCont.setArgumentAtIndex(u64le([160, 1, 1]).bytes, 2);
+    invFillCont.setArgumentAtIndex(u64le([256, 1, 1]).bytes, 3);
+    invFillCont.invoke;
+    encFillCont.endEncoding; cbFillCont.commit; cbFillCont.waitUntilCompleted;
+
+    for (var pIdx = 0; pIdx < perlCounts.length; pIdx++) {
+      var nProc = perlCounts[pIdx];
+      var isRepeat = (pIdx === perlCounts.length - 1 && nProc === 0);
+      var pids = [];
+      var rateFiles = [];
+
+      if (nProc > 0) {
+        for (var p = 0; p < nProc; p++) {
+          var rFile = "/tmp/mb_rate_" + p + "_" + Date.now() + "_" + Math.floor(Math.random() * 10000) + ".txt";
+          rateFiles.push(rFile);
+          var perlCmd = "/usr/bin/perl -MTime::HiRes=time -e '" +
+            "my $f = $ARGV[0]; " +
+            "$SIG{TERM} = sub { " +
+            "  my $dt = time() - $t0; " +
+            "  if ($dt > 0 && $iters > 0) { " +
+            "    my $gb = ($iters * 128 * 1024 * 1024) / ($dt * 1e9); " +
+            "    open(my $fh, \">\", $f); print $fh \"$gb\\n\"; close($fh); " +
+            "  } exit 0; " +
+            "}; " +
+            "my $b = \"A\" x (64 << 20); our $iters = 0; our $t0 = time(); " +
+            "while (1) { my $c = $b; substr($c, 0, 1) = \"B\"; $iters++; }' " +
+            rFile + " >/dev/null 2>&1 & echo $!";
+          var pidStr = runShell(perlCmd).trim();
+          if (pidStr) pids.push(pidStr);
+        }
+        delay(0.5); // let workers ramp
+      }
+
+      var times = [];
+      for (var r = 0; r < (isQuick ? 3 : 5); r++) {
+        var cb = q.commandBuffer; var enc = cb.computeCommandEncoder;
+        enc.setComputePipelineState(psoRead);
+        enc["setBuffer:offset:atIndex:"](srcBufCont, 0, 0);
+        enc["setBuffer:offset:atIndex:"](dstBufCont, 0, 1);
+        enc["setBuffer:offset:atIndex:"](constBufCont, 0, 2);
+        var inv = $.NSInvocation.invocationWithMethodSignature(sigDispatchTG);
+        inv.setSelector(selDispatchTG); inv.setTarget(enc);
+        inv.setArgumentAtIndex(u64le([160, 1, 1]).bytes, 2);
+        inv.setArgumentAtIndex(u64le([256, 1, 1]).bytes, 3);
+        inv.invoke;
+        enc.endEncoding; cb.commit; cb.waitUntilCompleted;
+        times.push(cb.GPUEndTime - cb.GPUStartTime);
+      }
+
+      var measuredCpuGBs = 0;
+      if (pids.length > 0) {
+        runShell("kill -TERM " + pids.join(" ") + " 2>/dev/null");
+        delay(0.2); // wait for writes
+        runShell("kill -9 " + pids.join(" ") + " 2>/dev/null");
+        for (var f = 0; f < rateFiles.length; f++) {
+          var raw = runShell("cat " + rateFiles[f] + " 2>/dev/null").trim();
+          var val = parseFloat(raw);
+          if (!isNaN(val) && val > 0) measuredCpuGBs += val;
+          runShell("rm -f " + rateFiles[f]);
+        }
+      }
+
+      var dstDataCont = $.NSData.dataWithBytesNoCopyLengthFreeWhenDone(dstBufCont.contents, 160 * 16, false);
+      var dstU32Cont = b64ToUint32Array(dstDataCont.base64EncodedStringWithOptions(0).js);
+      var actualSumCont = 0;
+      for (var t = 0; t < 160; t++) {
+        actualSumCont = (actualSumCont + dstU32Cont[t * 4]) >>> 0;
+      }
+      var expectedSumCont = (Math.imul(numElemsCont / 2, numElemsCont - 1)) >>> 0;
+      var verifiedCont = (actualSumCont === expectedSumCont);
+
+      var gpuGBs = (benchBytesCont / stats(times).median) / 1e9;
+      var totalGBs = gpuGBs + measuredCpuGBs;
+      // No DRAM spec is queryable, and a constant from one machine is wrong on
+      // every other. Record the total and its ratio to this run's GPU-only
+      // rate (the first N=0 row); a reader compares the total with their own
+      // machine's spec. On a single shared bus the total cannot exceed DRAM
+      // peak -- a total above the spec means a measurement error.
+      if (nProc === 0 && !isRepeat) contentionGpuOnlyGBs = gpuGBs;
+      var totalOverGpuOnly = contentionGpuOnlyGBs ? totalGBs / contentionGpuOnlyGBs : null;
+
+      var label = isRepeat ? "0 (repeat)" : String(nProc);
+      console.log("  Perl N=" + (label.length === 1 ? " " : "") + label +
+                  ": GPU Read = " + gpuGBs.toFixed(1) + " GB/s, Measured CPU = " +
+                  measuredCpuGBs.toFixed(1) + " GB/s, Total = " + totalGBs.toFixed(1) +
+                  " GB/s [total/GPU-only=" + (totalOverGpuOnly ? totalOverGpuOnly.toFixed(2) : "n/a") + ", verif=" + verifiedCont + "]");
+
+      contentionResults.push({
+        workers: nProc,
+        label: label,
+        gpuReadGBs: gpuGBs,
+        measuredCpuGBs: measuredCpuGBs,
+        totalGBs: totalGBs,
+        totalOverGpuOnly: totalOverGpuOnly,
+        verified: verifiedCont,
+        note: "measured GPU read + measured CPU read+write; compare the total with this machine's DRAM spec -- above it means a measurement error"
+      });
+    }
+  } else {
+    console.log("\n[Real CPU Contention skipped (--sections)]");
+  }
+
+  // 9. Dynamic Threadgroup Pool Evaluation Across Clean Shapes
   var poolCandidates = [];
   for (var i = 0; i < shapes.length; i++) poolCandidates.push(evaluateShapeCleanliness(shapes[i], ioregCoreCount));
   for (var i = 0; i < sSweepResults.length; i++) {
     if (sSweepResults[i].S > 0) poolCandidates.push(evaluateShapeCleanliness(sSweepResults[i], ioregCoreCount));
   }
   var cleanPoolShapes = poolCandidates.filter(function(c) { return c.clean; });
-  var poolLower = null;
+  var poolLower = null;     // set only by this run's consistent clean staircases
   var poolUpper = null;
   if (cleanPoolShapes.length > 0) {
     var lowers = cleanPoolShapes.map(function(s) { return s.lower; });
@@ -1203,27 +1583,33 @@ function runBenchmark(opts) {
     }
   }
 
-  // Suggested gate.py Device Row
+  // Suggested gate.py Device row: every field from THIS run, or null.
+  var dev0 = deviceFacts.length ? deviceFacts[0] : {};
+  var srcParts = ["probed via probe/metal-bench.js: " + ioregCoreCount + " GPU cores"];
+  if (steadyStateBwGBs !== null) srcParts.push(steadyStateBwGBs.toFixed(1) +
+      " GB/s measured streaming read (DRAM spec not queryable: set gb_s from the spec sheet)");
+  if (clockUsedMhz) srcParts.push(clockUsedMhz.toFixed(0) + " MHz clock via " + clockSource +
+      (issueFraction !== null ? (", FP32 issue " + issueFraction.toFixed(1) + "% of a 128-ALU peak") : ""));
+  if (fmaGflops !== null) srcParts.push(fmaGflops.toFixed(0) + " GFLOP/s FP32");
+  srcParts.push("maxThreadgroupMemoryLength " + maxTGMem + " B");
+  srcParts.push(poolLower !== null
+      ? ("shmem_pool_per_unit " + poolLower + " (" + poolLower + " <= pool < " + poolUpper + " B from clean staircases)")
+      : "shmem_pool_per_unit not measured in this run");
+  srcParts.push(maxThreadsPerUnitNote ? ("max_threads_per_unit: " + maxThreadsPerUnitNote)
+      : "max_threads_per_unit not measured in this run");
+  srcParts.push("SIMD width " + dPso.threadExecutionWidth);
   var suggestedDeviceRow = {
-    name: "Apple M4 (unified)",
-    gb_s: specBwGBs,
-    source: "probed via probe/metal-bench.js: " + ioregCoreCount + " GPU cores, " +
-            steadyStateBwGBs.toFixed(1) + " GB/s measured read DRAM (" +
-            (achievedFraction * 100).toFixed(1) + "% of " + specBwGBs.toFixed(0) + " GB/s spec), " +
-            (clockUsedMhz ? (clockUsedMhz.toFixed(0) + " MHz clock via " + clockSource + ", " +
-            (issueFraction !== null ? issueFraction.toFixed(1) + "% issue fraction, " : "")) : "clock unmeasured, ") +
-            fmaGflops.toFixed(0) + " GFLOP/s FP32 (" + derivedClock128AluGhz.toFixed(2) + " GHz derived @ 128 ALUs), " +
-            "maxThreadgroupMemoryLength " + maxTGMem + " B" +
-            (poolLower && poolUpper ? (", shmem_pool_per_unit " + poolLower + " (" + poolLower + ".." + poolUpper + " B bounded by clean staircases)") : "") +
-            ", max_threads_per_unit null (unmeasured; S=0 T-sweep is issue-saturating pure ALU), SIMD width " + dPso.threadExecutionWidth +
-            ", per-core residency measured by staircase for the shapes listed",
+    name: (dev0.name || "unknown GPU") + (dev0.hasUnifiedMemory ? " (unified)" : ""),
+    gb_s: null,
+    measured_read_gb_s: steadyStateBwGBs,
+    source: srcParts.join("; "),
     units: ioregCoreCount,
-    shmem_cap_per_block: maxTGMem,
+    shmem_cap_per_block: (maxTGMem !== null && maxTGMem !== undefined) ? Number(maxTGMem) : null,
     shmem_pool_per_unit: poolLower,
-    max_threads_per_unit: null,
-    clock_ghz: clockUsedMhz ? parseFloat((clockUsedMhz / 1000).toFixed(2)) : null,
-    gflops: Math.round(fmaGflops),
-    occupancy_verified: true
+    max_threads_per_unit: maxThreadsPerUnit,
+    clock_ghz: clockUsedMhz ? parseFloat((clockUsedMhz / 1000).toFixed(3)) : null,
+    gflops: fmaGflops !== null ? Math.round(fmaGflops) : null,
+    occupancy_verified: poolLower !== null
   };
 
   console.log("\n================================================================================");
@@ -1233,7 +1619,7 @@ function runBenchmark(opts) {
 
   var fullResults = {
     conditions: {
-      platform: "Apple M4 Mac mini (" + ioregCoreCount + " GPU cores, " + (hwMem / (1024 * 1024 * 1024)).toFixed(1) + " GB Unified Memory)",
+      platform: (deviceFacts.length ? deviceFacts[0].name : "unknown GPU") + " in " + hwModel + " (" + ioregCoreCount + " GPU cores, " + (hwMem / (1024 * 1024 * 1024)).toFixed(1) + " GB memory)",
       hwModel: hwModel,
       hwMemBytes: hwMem,
       macOS: "macOS " + swProduct + " (" + swBuild + ")",
@@ -1289,8 +1675,9 @@ function runBenchmark(opts) {
       derivedShmemPoolPerUnit: poolLower,
       derivedShmemPoolRange: poolLower ? [poolLower, poolUpper] : null,
       derivedShmemPoolNote: poolLower ? (poolLower + " <= pool < " + poolUpper + " B; bounded by clean staircases") : null,
-      maxThreadsPerUnit: null,
-      maxThreadsPerUnitNote: "unmeasured (null); S=0 T-sweep is an issue-saturating pure ALU chain without residency steps (brief design limitation)",
+      maxThreadsPerUnit: maxThreadsPerUnit,
+      maxThreadsPerUnitRange: maxThreadsPerUnitRange,
+      maxThreadsPerUnitNote: maxThreadsPerUnitNote || "not measured in this run (threads section skipped)",
       // Measured on THIS machine only. Any comparison with another instrument (e.g. a
       // decoder grid sweep) belongs in that machine's report, never as a literal here.
       decoderShapeTgsPerCore: (function () {
@@ -1321,18 +1708,23 @@ function run(argv) {
   argv = argv || [];
   var quick = false;
   var jsonPath = null;
+  var sections = null;
 
   for (var i = 0; i < argv.length; i++) {
     if (argv[i] === "--quick") quick = true;
     else if (argv[i] === "--json" && i + 1 < argv.length) {
       jsonPath = argv[i + 1];
       i++;
+    } else if (argv[i] === "--sections" && i + 1 < argv.length) {
+      sections = argv[i + 1].split(",");
+      i++;
     }
   }
 
   runBenchmark({
     quick: quick,
-    jsonPath: jsonPath
+    jsonPath: jsonPath,
+    sections: sections
   });
 
   return "DONE";

@@ -598,8 +598,10 @@ DEVICES = [
            "and 23,552, 2 at 31,744-32,768), the 4/core decoder shape "
            "independently matched by lmz's decoder grid sweep; clock 1.578 GHz "
            "= IOReport state P15, the state sustained FMA and decode runs sit "
-           "in. Threads per core NOT measured: 1024 is the API lower bound "
-           "(one 1024-thread threadgroup is legal per core) and binds nothing "
+           "in. Threads per core: probed five times by latency-bound "
+           "staircase and NOT reproducible (704-1,280 per core, best single "
+           "cap 992-1,280 by run), so 1024 is the API lower bound (one "
+           "1024-thread threadgroup is legal per core); it binds nothing "
            "derived here. Bus 120 GB/s is spec; 102 GB/s streaming read was "
            "measured. With CUDA k_shared's constants this row is a CEILING (2 "
            "blocks/unit, below the 3 k was measured at); lmz's own Metal kernel "
@@ -674,6 +676,15 @@ MEASURED_DECODE = {
     # The same decoder called the shipped way (lmz.gpu.decode_batch, wall
     # clock): host copies, not decoding, set this number.
     "lmz Metal, through lmz.gpu.decode_batch, Apple M4": 2.0,
+    # Phase 4 of the same record. The per-chunk-table kernel is what archives
+    # written today use; its shipped launch geometry (4 streams per 32-thread
+    # threadgroup) is ~2.3x below the same kernel at ~100 threadgroups.
+    "lmz Metal, per-chunk table, Apple M4, shipped geometry": 4.58,
+    "lmz Metal, per-chunk table, Apple M4, best grid (100 TGs)": 10.6,
+    # Fused BF16, counted in BF16 output bytes (19.6 in exponent-plane bytes).
+    # lmz's host API exposes no fused function; this is the kernel dispatched
+    # directly.
+    "lmz Metal, fused BF16, Apple M4, kernel only (BF16 bytes)": 39.2,
 }
 
 
