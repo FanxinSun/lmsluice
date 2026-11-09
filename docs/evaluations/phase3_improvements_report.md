@@ -4,7 +4,7 @@
 > **Host Environment:** Apple Silicon M4 (10 cores, 24 GB Unified Memory, macOS 15.4 / Darwin 24.4)  
 > **Software Stack:** PyTorch `2.12.0`, `transformers 5.8.1`, `lmsluice 0.2.0`, `lmz 1.3.0`, OpenSSL `3.5.9`  
 > **Test Date:** October 2026  
-> **Status:** **CERTIFIED & QUALIFIED**
+> **Status (2026-11-09): UNVERIFIED — not qualification.** Recorded on Apple M4 / 24 GB / macOS 15.4.1. The original "certified" status was withdrawn; see the SLUICE-USE-0 row of [PLAN.md](../../plan/PLAN.md) for the known measurement defects. Byte-identity and numerical-equality results stand; speedup and memory claims need a re-run with a plain internal-disk control.  
 
 ---
 

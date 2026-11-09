@@ -20,6 +20,17 @@ import unittest
 from lmsluice import buffer, cache, open_model, probe
 from lmsluice.rates import Codec, Profile, Storage
 
+# zstd is a property of the interpreter (Python 3.14+, or the `zstandard`
+# package), not a fault: the test that needs it skips rather than errors.
+try:
+    from lmsluice.zstdcodec import _zstd as _probe_zstd
+
+    _probe_zstd()
+    _ZSTD_WHY = ""
+except Exception as _exc:                     # noqa: BLE001 -- absence is the point
+    _ZSTD_WHY = str(_exc).split(".")[0]
+needs_zstd = unittest.skipIf(bool(_ZSTD_WHY), f"no zstd: {_ZSTD_WHY}")
+
 
 class TestPhase3Improvements(unittest.TestCase):
     def setUp(self):
@@ -60,6 +71,7 @@ class TestPhase3Improvements(unittest.TestCase):
         self.assertEqual(merged.decode, 2.2e9)
         self.assertEqual(merged.threads, 8)
 
+    @needs_zstd
     def test_cache_worth_caching_codecs(self):
         """worth_caching must accept codec and evaluate correctly."""
         # Create a small dummy file

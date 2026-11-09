@@ -279,7 +279,11 @@ def load_model(model_dir: str, device="cpu", *, dtype=None, config=None,
 
 
 def _mps(m, torch, dev) -> dict:
-    """Tensors transferred to Apple Silicon Metal Performance Shaders (MPS)."""
+    """Host tensors, then a copy to MPS. Not direct Metal placement.
+
+    The whole host state_dict is alive while the copy runs, so on unified memory
+    peak is roughly twice the checkpoint. The decode is still on the CPU.
+    """
     host_tensors = _host(m, torch)
     return {name: t.to(dev) for name, t in host_tensors.items()}
 

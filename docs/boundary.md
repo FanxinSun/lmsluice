@@ -15,9 +15,12 @@
 > I1 concerns the decoder core; public bundle/file helpers are consumer APIs,
 > not permission to move transport scheduling into that core.
 >
-> CPU/CUDA tensor placement is implemented; the torch adapter explicitly rejects
-> MPS. Host loading plus caller-owned MPS transfer is separate and needs its own
-> qualification. No native Metal decoder, direct MPS placement or framework
+> CPU/CUDA tensor placement is implemented. `device="mps"` is accepted by the
+> torch adapter as of the M4 branch, but it is **host loading followed by
+> `.to("mps")`** -- the route this note previously called separate -- not direct
+> Metal placement: it holds the whole host state_dict during the copy (about 2x
+> peak on unified memory) and has not been qualified against a plain internal-disk
+> control. No native Metal decoder, direct MPS placement or framework
 > numerical parity is established here. Inference lifecycle/deadlines remain
 > runtime-owned; vram is training-residency only. Both listed live loan rows
 > remain open; older references to three loans are a retired count, not a new loan.

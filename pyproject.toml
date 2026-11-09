@@ -96,3 +96,8 @@ version = {attr = "lmsluice.__version__"}
 # registered loan (see docs/boundary.md); shipping the PTX means a machine with
 # a driver but no nvcc still gets the device path.
 lmsluice = ["*.cu", "*.ptx"]
+
+[tool.pytest.ini_options]
+# `scripts/test_*.py` are real-model benchmark drivers (they load multi-GB
+# checkpoints and write results/); they are run by hand, not collected.
+testpaths = ["tests"]

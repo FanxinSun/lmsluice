@@ -1,6 +1,6 @@
 # Category 2: Compression & Conversion Qualification Report
 
-> **Document Status:** Executed & Certified  
+> **Status (2026-11-09): UNVERIFIED — not qualification.** Recorded on Apple M4 / 24 GB / macOS 15.4.1. The original "certified" status was withdrawn; see the SLUICE-USE-0 row of [PLAN.md](../../plan/PLAN.md) for the known measurement defects. Byte-identity and numerical-equality results stand; speedup and memory claims need a re-run with a plain internal-disk control.  
 > **Target Models Evaluated:** `Qwen3-4B`, `Qwen3-4B-Instruct-2507`, `Qwen3.5-4B` (24.3 GB total across 8 shards)  
 > **Storage Devices:** External USB SSD (`/Volumes/Elements`, 0.37 GB/s) vs. Internal NVMe (`/Users/masshj/models`, 3.49 GB/s)  
 > **Platform:** Apple M4 Mac mini (10 CPUs, 24 GB Unified Memory, macOS 15.4.1)  
