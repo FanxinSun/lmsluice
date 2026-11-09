@@ -12,7 +12,7 @@ WHAT THIS IS FOR
 
 WHAT YOU NEED
   Part 1 (D3D11 staircase)  : Windows PowerShell 5.1 (built into Windows 10/11).
-  Part 2 (Vulkan decoder)   : Python 3 and the GPU driver's Vulkan loader
+  Part 2 (Vulkan decoder)   : Python 3.9+ and the GPU driver's Vulkan loader
                               (vulkan-1.dll ships with AMD/NVIDIA/Intel drivers).
   Analysis                  : Python 3 (any machine; you can do this part later).
 

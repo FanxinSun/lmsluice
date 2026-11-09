@@ -29,8 +29,12 @@ cp "$here/igpu-bench.ps1"        "$dir/"
 vk=${LMZ_VULKAN_KIT:-$repo/../lmz/scratchpad/gpu/vulkan/kit}
 if [ -d "$vk" ] && [ -f "$vk/vulkan_sweep.py" ]; then
     mkdir -p "$dir/vulkan"
-    cp "$vk"/* "$dir/vulkan/"
-    echo "included Vulkan kit from $vk ($(du -sh "$vk" | cut -f1))"
+    # An explicit list: never a glob, so a stray result file or cache directory cannot ship.
+    for f in README.txt vulkan_sweep.py vulkan.py lmz_rans.spv lmz_rans_stride.spv kit-workload.bin; do
+        [ -f "$vk/$f" ] || { echo "Vulkan kit is missing $f (run scratchpad/gpu/vulkan/package_kit.py)" >&2; exit 1; }
+        cp "$vk/$f" "$dir/vulkan/$f"
+    done
+    echo "included Vulkan kit from $vk ($(du -sh "$dir/vulkan" | cut -f1))"
 else
     echo "no Vulkan kit found at $vk: building the D3D11 half only" >&2
     # Do not leave instructions that point at a folder that is not there.

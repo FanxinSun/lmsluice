@@ -673,18 +673,31 @@ MEASURED_DECODE = {
     # The same kernel at exactly its residency limit (40 threadgroups, one
     # wave): what the model's compute term describes, with no wave tail.
     "lmz Metal, shared table, Apple M4, 40 resident threadgroups": 25.9,
-    # The same decoder called the shipped way (lmz.gpu.decode_batch, wall
-    # clock): host copies, not decoding, set this number.
-    "lmz Metal, through lmz.gpu.decode_batch, Apple M4": 2.0,
-    # Phase 4 of the same record. The per-chunk-table kernel is what archives
-    # written today use; its shipped launch geometry (4 streams per 32-thread
-    # threadgroup) is ~2.3x below the same kernel at ~100 threadgroups.
+    # The same decoder called through lmz's Python API, wall clock. Before the
+    # 2026-11-09 zero-copy host rewrite host copies, not decoding, set the rate
+    # (4.7 GB/s in a fresh process; 2.0 called repeatedly in one). After it:
+    # 15 with page-aligned no-copy buffers, 22-25 with prepare_metal_batch.
+    "lmz Metal, through lmz.gpu.decode_batch, Apple M4, before the host rewrite": 4.7,
+    "lmz Metal, through lmz.gpu.decode_batch, Apple M4, page-aligned no-copy": 15.0,
+    "lmz Metal, through prepare_metal_batch, Apple M4, output read back": 22.6,
+    # The per-chunk-table kernel is what archives written today use. Kernel-only
+    # its shipped launch geometry (4 streams per 32-thread threadgroup) is ~2.3x
+    # below the same kernel at ~100 threadgroups. Through the API, plain
+    # decode_batch keeps the shipped geometry; the tuned grid is opt-in because
+    # finding it costs ~20 batch decodes.
     "lmz Metal, per-chunk table, Apple M4, shipped geometry": 4.58,
     "lmz Metal, per-chunk table, Apple M4, best grid (100 TGs)": 10.6,
-    # Fused BF16, counted in BF16 output bytes (19.6 in exponent-plane bytes).
-    # lmz's host API exposes no fused function; this is the kernel dispatched
-    # directly.
+    "lmz Metal, per-chunk table, through decode_batch, Apple M4": 4.0,
+    "lmz Metal, per-chunk table, through prepare_metal_batch (tuned), Apple M4": 10.8,
+    # Fused BF16, counted in BF16 output bytes (19.6 in exponent-plane bytes),
+    # kernel only; through the API 18.4 with the output read back, 38.9 left on
+    # the GPU. lmz's per-chunk archive path does not use it by default.
     "lmz Metal, fused BF16, Apple M4, kernel only (BF16 bytes)": 39.2,
+    # lmz's Vulkan decoder through MoltenVK (a translation layer over Metal, NOT a
+    # native Vulkan driver), same 936.6 MB data: 0.63-0.66x of native Metal at
+    # every occupancy, i.e. ~1.55x per-lane cost. Says nothing about native AMD,
+    # Intel or NVIDIA Vulkan drivers.
+    "lmz Vulkan via MoltenVK, shared table, Apple M4, kernel only": 16.6,
 }
 
 
@@ -807,9 +820,10 @@ def _table(codec_cost=None, metal_cost=None) -> None:
     print("device changes verdict with the disk beside it, which is why a gate")
     print("calibrated against one machine's NVMe is not a gate.")
     print("A verdict assumes the route delivers the decoder kernel's rate. On the")
-    print("Apple M4 the kernel does, but lmz's shipped Python path does not: it")
-    print("measured ~2 GB/s there (MEASURED_DECODE), so a Mac route needs a")
-    print("zero-copy decoder interface before its 'pays' holds end to end.\n")
+    print("Apple M4 the kernel does, but only through lmz's page-aligned or prepared")
+    print("buffers (15-25 GB/s); its copying path measured 2-5 GB/s there, and the")
+    print("per-chunk archives written today decode at 4 GB/s untuned. See")
+    print("MEASURED_DECODE; a verdict is about the route actually taken.\n")
 
     print("Measured decode rates, for comparison (no model involved)")
     for name, v in MEASURED_DECODE.items():

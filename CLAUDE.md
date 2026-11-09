@@ -48,9 +48,10 @@ Which makes the rule concrete and unusually sharp here:
   6.34 GB/s. On the Apple M4 Mac mini the internal NVMe reads 3.12 GB/s cold
   and a USB SSD 0.373. A SATA SSD is a tenth of the first, phone UFS a third,
   a Gen5 array twice it. The verdict flips inside that range for the same
-  device. It also assumes the route delivers the kernel's rate: lmz's
-  shipped Python GPU path delivers ~2 GB/s on the M4 against a 25.2 GB/s
-  kernel.
+  device. It also assumes the route delivers the kernel's rate. lmz's Python
+  GPU path did not on the M4 (2-5 GB/s against a 25.2 GB/s kernel, because it
+  copied everything); since 2026-11-09 it reaches 15-25 GB/s with page-aligned
+  or prepared buffers, and per-chunk archives decode at 4 GB/s untuned.
 - **FP32 FMA is a proxy and the wrong unit.** rANS decoding is integer work
   with dependent shared-memory loads. On the M4 one dependent threadgroup
   load costs ~69 cycles, and a decode step ~4 of them. `probe/` says so;
@@ -59,8 +60,10 @@ Which makes the rule concrete and unusually sharp here:
 - **The probe must reach the machines that matter.** Direct3D 11 covers
   Windows (`probe/igpu-bench.ps1`). Metal covers Apple hosts with nothing to
   install (`probe/metal-bench.js`, JavaScript for Automation via `osascript`;
-  a stock Mac has no Python without the Command Line Tools). Vulkan, for AMD
-  and Intel iGPUs on Linux, is still missing. A probe that needs a toolkit
+  a stock Mac has no Python without the Command Line Tools). For Vulkan there is
+  no device probe yet, but lmz now ships a working Vulkan decoder and a standalone
+  kit that measures decode on a native driver; through MoltenVK on the M4 it costs
+  ~1.55x per lane against Metal, which says nothing about AMD or Intel drivers. A probe that needs a toolkit
   cannot run on the machines it most needs to measure — that constraint is
   load-bearing, not incidental. A probe that prints *this* machine's numbers
   on another one is the same bug in a different place.
