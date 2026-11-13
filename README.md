@@ -6,22 +6,99 @@ decides by measurement rather than assumption, and it says what it decided and
 on what numbers. Pure standard library, and nothing about the bytes changes:
 every weight arrives byte-identical.
 
-> **Current status — 2026-10-03:** use the [canonical plan](plan/PLAN.md),
-> [handover intake](docs/handover-intake.md) and [ownership boundary](docs/boundary.md). Bundle delivery and optional-lmz
-> mechanics are accepted; real model quality, target readiness, affordability
-> and niche value remain open. The following older development-priority pointer
-> is **retired as plan authority** and retained as historical wording.
-> Numerical examples below are dated, machine-specific evidence/projections;
-> “needs no measurement” and universal download-win wording are retired as
-> guarantees. See the corrections in [MEASURED.md](MEASURED.md), including cold
-> cache uncertainty and a Mac host route where plain won. CPU/CUDA placement
-> does not establish MPS support; real ONNX Runtime execution remains NOT_RUN
-> in the accepted bundle campaign.
+> **Status — 2026-11-13.** Plan authority: [plan/PLAN.md](plan/PLAN.md); ownership:
+> [docs/boundary.md](docs/boundary.md); measurements: [MEASURED.md](MEASURED.md) and
+> [docs/evaluations/](docs/evaluations/). Every number on this page names its machine, and
+> **projections are marked as projections**. Older sections below are dated evidence and keep
+> their own corrections.
 
-Development priorities: [current plan](docs/strategy.md) — complete multimodal
-bundle delivery and consumer readiness, with affordability and niche positioning
-assessed independently. These are next-development priorities, not claims of
-universal model/engine support. The codec-independent/plain path remains core.
+## What it facilitates
+
+lmsluice is the **transport** half of a pair: [lmz](https://github.com/FanxinSun/lmz) compresses and decompresses model
+weights losslessly; lmsluice decides, per machine, how those weights travel and then moves them.
+
+| Job | What lmsluice does | Status |
+|---|---|---|
+| **Load a model** (safetensors, lmz archive, GGUF/ONNX bundles) | Measures this machine's disk against its decoder and takes the faster route: plain `mmap` or coded-and-decoded. Byte-identical either way. | measured on 2 machines |
+| **Fetch over HTTP(S)** | Parallel range GETs, decoded as they land; works with servers that refuse ranges | local servers only; **no real WAN run yet** |
+| **Read/write buckets** | S3, GCS, Azure Blob (+ MinIO, R2, B2, Ceph, Wasabi) with **no SDK**; signing checked against each vendor's published examples | real anonymous reads; **signed real-store run not yet done** |
+| **Cache on first fetch** | Compresses a model after its first load *only if that pays here*; refuses on a fast NVMe | measured |
+| **Encrypt at rest** | AES-256-GCM via the system's OpenSSL, key always a file path, structure readable but authenticated | measured cost |
+| **Partial reads** | Fetches and decodes only the chunks covering one tensor (inspection, surgery, LoRA work) | measured on the M4 |
+| **Decide before doing** | `lmsluice plan` / `cache` / `gate.py` print the verdict and the numbers behind it | — |
+| **Probe the silicon** | Zero-install probes (D3D11 on Windows, Metal via JXA on macOS) and a 2-CU kit for iGPUs | M4 measured; D3D11 script verified in a Win11 VM |
+
+Pure standard library; lmz, zstandard and cloud SDKs are optional upgrades, not prerequisites.
+
+## How it performs, by OS and chip
+
+**Read this first.** The comparison that decides everything is *decoder speed vs. link speed*.
+lmsluice wins on slow links, ties or loses on fast local disks, and says which before it starts.
+"Speed vs. peer" below is **load (or save) time relative to the incumbent plain loader, 100% = same
+speed**, so 200% means twice as fast. Only head-to-head runs on the same machine are given as
+percentages; published numbers from other products on other hardware are **not** comparable and are
+kept in [docs/competition.md](docs/competition.md).
+
+### End-to-end transport, measured
+
+| OS | Chip | Link | Peer (same box) | lmsluice speed vs. peer | Source |
+|---|---|---|---|---:|---|
+| macOS 15.4 | Apple M4 (Mac mini, 24 GB) | USB SSD, 0.373 GB/s | `safetensors.load_file` | **200%** (15.1 s vs 30.3 s, 8.05 GB Qwen3-4B → MPS) | [category1 re-run](docs/evaluations/category1_rerun_report.md) |
+| macOS 15.4 | Apple M4 | USB SSD | best parallel plain reader | **152%** | same |
+| macOS 15.4 | Apple M4 | internal NVMe, 3.12 GB/s | `safetensors.load_file` | 143% | same |
+| macOS 15.4 | Apple M4 | internal NVMe | best parallel plain reader | **102% — a tie**, at **9× the peak memory** (4.8 GB vs 0.5 GB); an ideal plain reader is projected 53% faster | same |
+| Linux (WSL2) | Ryzen 9800X3D | 9p / network mount, 0.26 GB/s | plain read | **145%** load, **127%** save (1 GiB BF16, cold) | [MEASURED.md](MEASURED.md) |
+| Linux (WSL2) | Ryzen 9800X3D | Gen4 NVMe, warm, 6.2 GB/s | plain read | **74% — a loss**, which the gate predicts and reports | MEASURED.md |
+| Linux (WSL2) | Ryzen 9800X3D | slow link, cache built on first fetch | plain read | **180%** (385% with the cache on local disk) | MEASURED.md |
+| Linux (WSL2) | Ryzen 9800X3D | sealed (encrypted) archive | the same archive unsealed | 97% on 1 fetch thread, 79% on 16 | MEASURED.md |
+| Windows 11 | any | — | — | **not measured.** Only the D3D11 probe has run (in a Parallels VM). | [probe/README.md](probe/README.md) |
+| Android / phone | any | UFS 4.0 | — | **not measured**; the gate projects "pays" | projection |
+
+The gate's own **route choice** was right on every shard measured on the M4: coded on the USB SSD,
+plain on the internal NVMe (3 models, [category 2](docs/evaluations/category2_compression_report.md)).
+
+### Compression, against peer codecs
+
+| Comparison | lmz (what lmsluice ships) | Peer | lmz as % of peer's saving | Basis |
+|---|---:|---:|---:|---|
+| Qwen2.5-0.5B base + 4 fine-tunes, same pipeline | **51.55% saved** | ZipLLM method, zstd -19: 42.36% | **122%** | head-to-head, same box |
+| Qwen3-4B BF16 on the M4 | 33.7% saved, encodes 1.66 GB/s | stdlib zstd: 21.7% saved | 155% saved, 173% encode speed | head-to-head, same box |
+| Llama-3.1-8B shards | 34.7% saved | ZipNN: 33.6% (published) | ~103% | **not like-for-like** (their number, their box) |
+
+### GPU decode, by chip (the decoder lmsluice can route to)
+
+Kernel rates in GB/s of decoded output. These are lmz's decoder on each device, not end-to-end loads.
+
+| Chip | Backend | Decode GB/s | vs. CPU decode (2 GB/s) | Status |
+|---|---|---:|---:|---|
+| NVIDIA RTX 5080 | CUDA | 418 (shared table) / 111 (per-chunk) / 101 (through lmsluice) | 50–200× | measured |
+| Apple M4, 10-core GPU | Metal | 25.2 kernel; 15–25 through the Python API; 4.0 for per-chunk archives untuned | 2–12× | measured |
+| Apple M4 | Vulkan via MoltenVK | 16.6 (**66% of native Metal**, flat at every occupancy) | 8× | measured; a translation layer, not a native driver |
+| M4 Max, Strix Halo, Radeon 780M, phone SoC, **Radeon 2-CU iGPU** | Metal / Vulkan | ≤ 241 / 112 / 26 / 30 / 26 (bandwidth ceilings) | — | **projection only**; Vulkan `k` is borrowed from CUDA |
+
+The GPU numbers matter for a fast-disk verdict only once lmsluice's own loaders route to them: today
+its torch adapter decodes on the CPU on macOS (see below).
+
+## Future perspectives
+
+Most valuable first, all subject to [the plan](plan/PLAN.md); none of these is a commitment.
+
+1. **Measure the small iGPU.** The founding claim is that a 2-CU Radeon decodes faster than its disk.
+   It is unmeasured. The kit (`probe/build-kit.sh` → `results/2cu-kit-*.zip`) measures residency
+   (D3D11) and native-Vulkan decode on that machine; one run on real AMD hardware replaces every
+   borrowed `k` row above.
+2. **Route macOS loads through the GPU decoder.** lmz's Metal path now reaches 15–25 GB/s, but
+   lmsluice's torch adapter still decodes on the CPU and copies with `.to("mps")`. Wiring in
+   `prepare_metal_batch` is the change that would turn the internal-NVMe tie into a win, and could
+   remove the 9× memory peak. Projection until measured.
+3. **Close the unverified paths:** a real wide-area download, a signed request against a real bucket,
+   a native Windows load, and a phone (UFS) load. The gate says all of them pay; none has been timed.
+4. **Native Vulkan drivers** (AMD, Intel, NVIDIA) for a measured, not borrowed, Vulkan `k`, and
+   subgroup sizes other than 32.
+5. **Watch the lanes that move.** Snapshot-and-restore serving (Modal, vLLM sleep mode) and Xet's
+   chunk dedup on the Hugging Face hub take part of the cold-start and download win; lmsluice's lane is
+   the one nobody else occupies, **deciding per machine whether compression pays at all**, and the
+   evidence above is that the answer really does flip with the disk.
 
 ## Who this is for
 
