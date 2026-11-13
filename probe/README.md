@@ -198,8 +198,13 @@ capacity interval to contain 252 (3 groups per SM; lmz measured 3–4 and the qu
 gives 3). A method that cannot recover that has not earned an answer on a device where nothing can
 check it.
 
-**Status.** As of 2026-11-09 this script has been written and its HLSL compiled to SPIR-V by glslang
-(syntax and semantics checked); the analyzer is tested on synthetic curves and on real Apple M4
-staircase data. **The PowerShell/C# interop has not been run on any Windows machine.** Its vtable
-slots are those of `igpu-bench.ps1`, which has run, plus none new; treat the first real run as the
-test of the script.
+**Status.** Run on 2026-11-13 in a Windows 11 VM (Parallels, PowerShell 5.1) on the Apple M4 Mac mini,
+adapter "Parallels Display Adapter (WDDM)", `-Units 10`: the C# interop compiled, the HLSL compiled
+through `d3dcompiler_47`, all kernel outputs matched the CPU check, and JSON was written, in `-Quick` and
+in two full runs. Analysed together, the staircase reproduces the *native* Metal result on the same
+hardware (4 groups per unit at 19,456 B, 3 at 24,576, 2 at 28,672 and 32,768; pool 77,824 <= pool <
+86,016 B against 77,824 <= pool < 83,968 B measured natively): the method recovers an independently
+known occupancy through a different API path. **That calibrates the method, not any other device**: it
+is a virtualised GPU over Metal, the unit count was supplied by hand, and the shapes whose first wave
+exceeds `-MaxGroups` (the S = 1,024 T-sweep) never leave it. **Not yet run on real AMD, Intel or NVIDIA
+hardware.** Raw files: `results/vmtest/` (kept in git as evidence).

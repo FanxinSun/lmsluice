@@ -75,5 +75,6 @@ WHAT THIS DOES NOT MEASURE
     real decode on this hardware, which nothing here is.
   * Not the CPU contending for the same memory bus.
   * The unit count is typed in, not detected.
-  * The PowerShell/D3D11 script was written on a Mac and has NEVER run on Windows
-    before this.  If it errors, send the error text; that is useful.
+  * The PowerShell/D3D11 script has run only in a Windows 11 VM on a Mac (where it
+    reproduced a known staircase); it has not run on real AMD/Intel/NVIDIA hardware.
+    If it errors, send the error text; that is useful.
